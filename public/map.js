@@ -15,6 +15,19 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
   maxZoom: 19,
 }).addTo(map);
 
+// At a zoomed-out view, dozens of full-size train markers on nearby track segments pile
+// up into an undifferentiated cluster. Scale them down via a single inherited CSS
+// variable instead of resizing every marker's icon individually on each zoom change.
+const mapEl = document.getElementById('map');
+function markerScaleForZoom(zoom) {
+  return Math.min(1, Math.max(0.35, (zoom - 9) / 6));
+}
+function updateMarkerScale() {
+  mapEl.style.setProperty('--marker-scale', markerScaleForZoom(map.getZoom()));
+}
+map.on('zoom', updateMarkerScale);
+updateMarkerScale();
+
 const vehicleMarkers = new Map(); // tripId -> L.marker
 const vehicleSegments = new Map(); // tripId -> { routeId, segment }
 
@@ -153,8 +166,10 @@ async function loadGeometry() {
     }
   }
 
+  const stationLayer = L.layerGroup();
+  const stationMarkers = [];
   for (const station of stations) {
-    L.circleMarker([station.lat, station.lon], {
+    const marker = L.circleMarker([station.lat, station.lon], {
       radius: 4,
       color: '#e6edf3',
       fillColor: '#0b0f14',
@@ -162,8 +177,31 @@ async function loadGeometry() {
       weight: 2,
     })
       .bindTooltip(station.name, { direction: 'top' })
-      .addTo(map);
+      .addTo(stationLayer);
+    stationMarkers.push(marker);
   }
+
+  // At a zoomed-out, city-wide view, 176 station dots across 10 lines is mostly clutter —
+  // only show them once zoomed in enough to actually tell stations apart, and scale their
+  // size down at the lower end of that range so they stay unobtrusive.
+  const STATION_VISIBILITY_ZOOM = 12;
+  function radiusForZoom(zoom) {
+    return Math.min(6, Math.max(2, zoom - 9));
+  }
+  function updateStationDisplay() {
+    const zoom = map.getZoom();
+    const shouldShow = zoom >= STATION_VISIBILITY_ZOOM;
+    const isShown = map.hasLayer(stationLayer);
+    if (shouldShow && !isShown) stationLayer.addTo(map);
+    else if (!shouldShow && isShown) map.removeLayer(stationLayer);
+
+    if (shouldShow) {
+      const radius = radiusForZoom(zoom);
+      for (const marker of stationMarkers) marker.setRadius(radius);
+    }
+  }
+  map.on('zoomend', updateStationDisplay);
+  updateStationDisplay();
 }
 
 function updateVehicles(vehicles) {

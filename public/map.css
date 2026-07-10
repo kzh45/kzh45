@@ -59,6 +59,10 @@ html, body.map-body {
     0 0 0 2px #0b0f14,
     0 0 0 5px var(--status-color, #8b98a5),
     0 0 6px rgba(0, 0, 0, 0.6);
+  /* Set on #map and inherited down, so all train markers shrink together at low zoom
+     instead of piling up into an undifferentiated cluster of full-size dots. */
+  transform: scale(var(--marker-scale, 1));
+  transition: transform 0.2s ease-out;
 }
 
 .legend {
