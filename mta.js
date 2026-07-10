@@ -60,43 +60,68 @@ async function computeVehicleSegment(routeId, stations, targetStopId, currentSta
   };
 }
 
-// The 7 train doesn't have its own feed under the current MTA endpoint —
-// it's bundled into the bare "gtfs" feed alongside 1/2/3/4/5/6/S.
-const FEED_URL = 'https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs';
+// NYCT splits the system across 7 separate GTFS-RT feeds, grouped roughly by which
+// physical lines interline. The numbered lines (plus their express variants and the 42nd
+// St Shuttle) share one bare feed; each lettered group has its own.
+const FEED_BASE = 'https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/';
+const FEED_GROUPS = {
+  'nyct%2Fgtfs': ['1', '2', '3', '4', '5', '6', '6X', '7', '7X', 'GS'],
+  'nyct%2Fgtfs-ace': ['A', 'C', 'E', 'H'],
+  'nyct%2Fgtfs-bdfm': ['B', 'D', 'F', 'M', 'FS'], // the Franklin Ave Shuttle is bundled here, not with ACE
+  'nyct%2Fgtfs-g': ['G'],
+  'nyct%2Fgtfs-jz': ['J', 'Z'],
+  'nyct%2Fgtfs-l': ['L'],
+  'nyct%2Fgtfs-nqrw': ['N', 'Q', 'R', 'W'],
+};
 
-// The MTA feed itself only updates every ~30s, so cache the decoded feed briefly
-// instead of re-fetching and re-decoding it on every client request.
+const ROUTE_TO_FEED_URL = new Map();
+const ALL_ROUTE_IDS = [];
+for (const [path, routeIds] of Object.entries(FEED_GROUPS)) {
+  for (const routeId of routeIds) {
+    ROUTE_TO_FEED_URL.set(routeId, FEED_BASE + path);
+    ALL_ROUTE_IDS.push(routeId);
+  }
+}
+
+// Each underlying feed only updates every ~30s, so cache each decoded feed briefly
+// instead of re-fetching and re-decoding it on every client request. Cached per feed URL
+// since each of NYCT's 7 feeds is a separate network request.
 const CACHE_TTL_MS = 15000;
-let cache = null; // { fetchedAt, entities }
-let inFlight = null; // Promise, deduped so concurrent requests share one fetch
+const feedCache = new Map(); // url -> { fetchedAt, entities }
+const feedInFlight = new Map(); // url -> Promise
 
-async function fetchFeed() {
-  if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
-    return cache;
+async function fetchFeed(feedUrl) {
+  const cached = feedCache.get(feedUrl);
+  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    return cached;
   }
 
-  if (!inFlight) {
-    inFlight = (async () => {
-      // As of nyct-gtfs v2.0.0 / MTA's current endpoint, API keys are no longer required.
-      const apiKey = process.env.MTA_API_KEY;
-      const headers = apiKey ? { 'x-api-key': apiKey } : {};
+  if (!feedInFlight.has(feedUrl)) {
+    feedInFlight.set(
+      feedUrl,
+      (async () => {
+        // As of nyct-gtfs v2.0.0 / MTA's current endpoint, API keys are no longer required.
+        const apiKey = process.env.MTA_API_KEY;
+        const headers = apiKey ? { 'x-api-key': apiKey } : {};
 
-      const response = await fetch(FEED_URL, { headers });
-      if (!response.ok) {
-        throw new Error(`MTA feed request failed: ${response.status} ${response.statusText}`);
-      }
+        const response = await fetch(feedUrl, { headers });
+        if (!response.ok) {
+          throw new Error(`MTA feed request failed: ${response.status} ${response.statusText}`);
+        }
 
-      const buffer = await response.arrayBuffer();
-      const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
+        const buffer = await response.arrayBuffer();
+        const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
 
-      cache = { fetchedAt: Date.now(), entities: feed.entity };
-      return cache;
-    })().finally(() => {
-      inFlight = null;
-    });
+        const result = { fetchedAt: Date.now(), entities: feed.entity };
+        feedCache.set(feedUrl, result);
+        return result;
+      })().finally(() => {
+        feedInFlight.delete(feedUrl);
+      })
+    );
   }
 
-  return inFlight;
+  return feedInFlight.get(feedUrl);
 }
 
 // The trip-matching/delay/interpolation work below is the expensive part (hundreds of
@@ -130,7 +155,10 @@ async function fetchRouteUpdates(routeId) {
 }
 
 async function computeRouteUpdates(routeId) {
-  const [{ fetchedAt, entities }, { stations }] = await Promise.all([fetchFeed(), getGeometry(routeId)]);
+  const feedUrl = ROUTE_TO_FEED_URL.get(routeId);
+  if (!feedUrl) throw new Error(`Unknown routeId: ${routeId}`);
+
+  const [{ fetchedAt, entities }, { stations }] = await Promise.all([fetchFeed(feedUrl), getGeometry(routeId)]);
   const stationById = new Map(stations.map((s) => [s.stopId, s]));
 
   const trips = [];
@@ -199,4 +227,4 @@ async function fetchLinesUpdates(routeIds) {
   };
 }
 
-module.exports = { fetchRouteUpdates, fetchLinesUpdates };
+module.exports = { fetchRouteUpdates, fetchLinesUpdates, ALL_ROUTE_IDS };
