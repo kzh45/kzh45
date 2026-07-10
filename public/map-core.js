@@ -74,6 +74,16 @@ function createTrackIndex() {
   function addRoute(route, stations) {
     routeColors.set(route.routeId, route.color || DEFAULT_ROUTE_COLOR);
 
+    // Only match this route's own stations against its own shapes — checking all
+    // system-wide stations against every route (the previous behavior) is the difference
+    // between sub-100ms and a multi-second main-thread stall on page load.
+    const relevantStations = route.stationIds
+      ? (() => {
+          const idSet = new Set(route.stationIds);
+          return stations.filter((s) => idSet.has(s.stopId));
+        })()
+      : stations;
+
     const directions = {};
     const indexByDirection = {};
     for (const direction of ['N', 'S']) {
@@ -81,7 +91,7 @@ function createTrackIndex() {
       if (!shapes || !shapes.length) continue;
       directions[direction] = shapes;
       indexByDirection[direction] = new Map(
-        stations.map((s) => [s.stopId, bestShapeMatchForStation(shapes, s.lat, s.lon)])
+        relevantStations.map((s) => [s.stopId, bestShapeMatchForStation(shapes, s.lat, s.lon)])
       );
     }
     trackByRoute.set(route.routeId, directions);

@@ -498,7 +498,17 @@ async function getMultiRouteGeometry(routeIds) {
 
   return {
     stations: [...stationsById.values()],
-    routes: results.map((r) => ({ routeId: r.routeId, color: r.color, track: r.track })),
+    // stationIds lets clients filter the global station list down to just the ~20-90
+    // stations a given route actually serves before doing any per-station geometry
+    // matching — without it, matching logic ends up checking every station against every
+    // route's shapes (475 stations x 27 routes instead of ~50 x 27), which is the
+    // difference between sub-100ms and a multi-second main-thread stall on page load.
+    routes: results.map((r) => ({
+      routeId: r.routeId,
+      color: r.color,
+      track: r.track,
+      stationIds: r.stations.map((s) => s.stopId),
+    })),
   };
 }
 
