@@ -32,9 +32,11 @@ html, body.map-body {
 
 /* Position is recomputed every 1s in map.js (continuous crawl between stations);
    this transition smooths out the small per-tick jump into a fluid glide.
-   During zoom, Leaflet repositions markers itself (adding .leaflet-zoom-anim to
-   the map pane) — our transition must be off then, or markers visibly lag/drift
-   behind the map instead of scaling with it. */
+   During zoom, Leaflet repositions markers itself — our transition must be off then,
+   or markers visibly lag/float away from the map instead of scaling with it. Two rules
+   cover this: .leaflet-zoom-anim (Leaflet's own class for CSS3 animated zoom) and
+   .zooming (set via zoomstart/zoomend in map.js) — the former doesn't reliably cover
+   touch pinch-zoom on mobile, so both are needed. */
 .leaflet-marker-icon.train-icon {
   transition: transform 1.05s linear;
   display: flex;
@@ -42,7 +44,8 @@ html, body.map-body {
   justify-content: center;
 }
 
-.leaflet-zoom-anim .leaflet-marker-icon.train-icon {
+.leaflet-zoom-anim .leaflet-marker-icon.train-icon,
+#map.zooming .leaflet-marker-icon.train-icon {
   transition: none !important;
 }
 

@@ -21,6 +21,13 @@ function updateMarkerScale() {
 map.on('zoom', updateMarkerScale);
 updateMarkerScale();
 
+// The per-tick glide transition (see map.css) must be off during ANY zoom, or markers
+// visibly lag/float away from the map instead of scaling with it. Relying on Leaflet's
+// own .leaflet-zoom-anim class covers button/programmatic zoom but not touch pinch-zoom
+// reliably (seen on mobile) — zoomstart/zoomend fire for every zoom interaction method.
+map.on('zoomstart', () => mapEl.classList.add('zooming'));
+map.on('zoomend', () => mapEl.classList.remove('zooming'));
+
 const vehicleMarkers = new Map(); // tripId -> L.marker
 const vehicleSegments = new Map(); // tripId -> { routeId, segment }
 const trackIndex = createTrackIndex();
