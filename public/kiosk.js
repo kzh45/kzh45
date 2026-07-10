@@ -73,7 +73,12 @@ function updateVehicles(vehicles) {
 
     const existing = vehicleMarkers.get(v.tripId);
     if (existing) {
+      // Don't rely solely on the 1s tick to keep existing markers positioned — WebViews/
+      // backgrounded tabs commonly throttle JS timers, which would otherwise freeze a
+      // marker mid-segment until the timer resumes (then jump). Resyncing here bounds
+      // any such freeze to at most one poll interval.
       existing.setIcon(trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus));
+      existing.setLatLng(trackIndex.positionAlongSegment(v.routeId, v.segment, now));
     } else {
       const marker = L.marker(trackIndex.positionAlongSegment(v.routeId, v.segment, now), {
         icon: trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus),
@@ -136,7 +141,12 @@ async function requestWakeLock() {
 }
 requestWakeLock();
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') requestWakeLock();
+  if (document.visibilityState === 'visible') {
+    requestWakeLock();
+    // The 1s tick can get throttled while backgrounded and doesn't reliably fire the
+    // instant a page becomes visible again — force an immediate resync.
+    tickVehiclePositions();
+  }
 });
 
 setTimeout(() => location.reload(), AUTO_RELOAD_MS);

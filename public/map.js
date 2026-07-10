@@ -56,6 +56,13 @@ function tickVehiclePositions() {
 }
 setInterval(tickVehiclePositions, 1000);
 
+// The 1s interval itself can get throttled while backgrounded (mobile WebViews especially)
+// and browsers don't reliably fire it the instant a page becomes visible again — force an
+// immediate resync so markers don't sit visibly stale for up to another second after that.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) tickVehiclePositions();
+});
+
 async function loadGeometry() {
   const res = await fetch('/api/lines/geometry');
   if (!res.ok) throw new Error(`Geometry API error ${res.status}`);
@@ -122,7 +129,12 @@ function updateVehicles(vehicles) {
 
     const existing = vehicleMarkers.get(v.tripId);
     if (existing) {
+      // Don't rely solely on the 1s tick to keep existing markers positioned — mobile
+      // WebViews commonly throttle/pause JS timers when not the frontmost active view,
+      // which would otherwise freeze a marker mid-segment until the timer resumes (then
+      // jump). Resyncing here bounds any such freeze to at most one poll interval.
       existing.setIcon(trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus));
+      existing.setLatLng(trackIndex.positionAlongSegment(v.routeId, v.segment, now));
     } else {
       const marker = L.marker(trackIndex.positionAlongSegment(v.routeId, v.segment, now), {
         icon: trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus),
