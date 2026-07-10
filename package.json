@@ -1,0 +1,21 @@
+{
+  "name": "transitapp",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "fetch:7train": "node fetch-7-train.js",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "gtfs-realtime-bindings": "^2.1.0",
+    "node-fetch": "^2.7.0"
+  }
+}
