@@ -6,23 +6,48 @@ const GtfsRealtimeBindings = require('gtfs-realtime-bindings');
 // it's bundled into the bare "gtfs" feed alongside 1/2/3/4/5/6/S.
 const FEED_URL = 'https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs';
 
-async function fetchRouteUpdates(routeId) {
-  // As of nyct-gtfs v2.0.0 / MTA's current endpoint, API keys are no longer required.
-  const apiKey = process.env.MTA_API_KEY;
-  const headers = apiKey ? { 'x-api-key': apiKey } : {};
+// The MTA feed itself only updates every ~30s, so cache the decoded feed briefly
+// instead of re-fetching and re-decoding it on every client request.
+const CACHE_TTL_MS = 15000;
+let cache = null; // { fetchedAt, entities }
+let inFlight = null; // Promise, deduped so concurrent requests share one fetch
 
-  const response = await fetch(FEED_URL, { headers });
-  if (!response.ok) {
-    throw new Error(`MTA feed request failed: ${response.status} ${response.statusText}`);
+async function fetchFeed() {
+  if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
+    return cache;
   }
 
-  const buffer = await response.arrayBuffer();
-  const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
+  if (!inFlight) {
+    inFlight = (async () => {
+      // As of nyct-gtfs v2.0.0 / MTA's current endpoint, API keys are no longer required.
+      const apiKey = process.env.MTA_API_KEY;
+      const headers = apiKey ? { 'x-api-key': apiKey } : {};
+
+      const response = await fetch(FEED_URL, { headers });
+      if (!response.ok) {
+        throw new Error(`MTA feed request failed: ${response.status} ${response.statusText}`);
+      }
+
+      const buffer = await response.arrayBuffer();
+      const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
+
+      cache = { fetchedAt: Date.now(), entities: feed.entity };
+      return cache;
+    })().finally(() => {
+      inFlight = null;
+    });
+  }
+
+  return inFlight;
+}
+
+async function fetchRouteUpdates(routeId) {
+  const { fetchedAt, entities } = await fetchFeed();
 
   const trips = [];
   const vehicles = [];
 
-  for (const entity of feed.entity) {
+  for (const entity of entities) {
     if (entity.tripUpdate && entity.tripUpdate.trip.routeId === routeId) {
       const trip = entity.tripUpdate.trip;
       trips.push({
@@ -44,7 +69,7 @@ async function fetchRouteUpdates(routeId) {
     }
   }
 
-  return { fetchedAt: Date.now(), trips, vehicles };
+  return { fetchedAt, trips, vehicles };
 }
 
 module.exports = { fetchRouteUpdates };
