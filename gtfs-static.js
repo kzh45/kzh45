@@ -134,12 +134,91 @@ async function parseStopTimesForTrips(tripIds) {
   return stopTimesByTrip;
 }
 
+function parseStationsForRoute(stopTimesByTrip) {
+  const baseStopIds = new Set();
+  for (const stopTimes of stopTimesByTrip.values()) {
+    for (const stopId of stopTimes.keys()) {
+      baseStopIds.add(stopId.slice(0, -1)); // strip trailing N/S platform suffix
+    }
+  }
+
+  const rows = fs
+    .readFileSync(path.join(DATA_DIR, 'stops.txt'), 'utf8')
+    .trim()
+    .split('\n')
+    .slice(1);
+
+  const stations = new Map(); // stopId -> { name, lat, lon }
+  for (const line of rows) {
+    const [stopId, stopName, lat, lon, locationType] = line.split(',');
+    if (locationType !== '1' || !baseStopIds.has(stopId)) continue;
+    stations.set(stopId, { name: stopName, lat: Number(lat), lon: Number(lon) });
+  }
+
+  return stations;
+}
+
+function parseShapeIdsForRoute(routeId) {
+  const rows = fs
+    .readFileSync(path.join(DATA_DIR, 'trips.txt'), 'utf8')
+    .trim()
+    .split('\n')
+    .slice(1);
+
+  const shapeIdsByDirection = { 0: new Set(), 1: new Set() }; // direction_id -> shape_ids
+  for (const line of rows) {
+    const [tripRouteId, , , , directionId, shapeId] = line.split(',');
+    if (tripRouteId !== routeId) continue;
+    shapeIdsByDirection[directionId]?.add(shapeId);
+  }
+  return shapeIdsByDirection;
+}
+
+async function parseShapesForRoute(routeId) {
+  const shapeIdsByDirection = parseShapeIdsForRoute(routeId);
+  const candidateShapeIds = new Set([...shapeIdsByDirection[0], ...shapeIdsByDirection[1]]);
+
+  const pointsByShapeId = new Map(); // shapeId -> [[lat, lon], ...]
+  const rl = readline.createInterface({
+    input: fs.createReadStream(path.join(DATA_DIR, 'shapes.txt')),
+    crlfDelay: Infinity,
+  });
+
+  let isFirstLine = true;
+  for await (const line of rl) {
+    if (isFirstLine) {
+      isFirstLine = false;
+      continue;
+    }
+    const [shapeId, , lat, lon] = line.split(',');
+    if (!candidateShapeIds.has(shapeId)) continue;
+    if (!pointsByShapeId.has(shapeId)) pointsByShapeId.set(shapeId, []);
+    pointsByShapeId.get(shapeId).push([Number(lat), Number(lon)]);
+  }
+
+  // Multiple shape variants exist per direction (branch/reroute patterns); use the
+  // fullest one as a reasonable stand-in for the main line's track geometry.
+  const shapeByDirection = {};
+  for (const directionId of [0, 1]) {
+    let best = null;
+    for (const shapeId of shapeIdsByDirection[directionId]) {
+      const points = pointsByShapeId.get(shapeId);
+      if (points && (!best || points.length > best.length)) best = points;
+    }
+    shapeByDirection[directionId] = best || [];
+  }
+
+  return shapeByDirection;
+}
+
 async function load(routeId) {
   await ensureStaticData();
   const serviceIdsForDate = parseCalendar();
   const { tripsByKey, tripIds } = parseTripsForRoute(routeId);
   const stopTimesByTrip = await parseStopTimesForTrips(tripIds);
-  return { serviceIdsForDate, tripsByKey, stopTimesByTrip };
+  const stations = parseStationsForRoute(stopTimesByTrip);
+  const shapeByDirection = await parseShapesForRoute(routeId);
+  return { serviceIdsForDate, tripsByKey, stopTimesByTrip, stations, shapeByDirection };
 }
 
 async function getLoaded(routeId) {
@@ -194,4 +273,20 @@ async function getScheduledTimeMs(routeId, realtimeTripId, stopId, now = new Dat
   return null;
 }
 
-module.exports = { getScheduledTimeMs };
+// direction_id 1 corresponds to the "S" (Manhattan-bound) platform suffix, 0 to "N".
+const DIRECTION_ID_TO_LETTER = { 0: 'N', 1: 'S' };
+
+// Returns { stations: [{ stopId, name, lat, lon }], track: { N: [[lat,lon],...], S: [...] } }
+async function getGeometry(routeId) {
+  const { stations, shapeByDirection } = await getLoaded(routeId);
+
+  return {
+    stations: [...stations.entries()].map(([stopId, s]) => ({ stopId, ...s })),
+    track: {
+      N: shapeByDirection[0],
+      S: shapeByDirection[1],
+    },
+  };
+}
+
+module.exports = { getScheduledTimeMs, getGeometry, DIRECTION_ID_TO_LETTER };

@@ -1,0 +1,78 @@
+html, body.map-body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+.map-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  padding: 16px;
+  background: linear-gradient(to bottom, rgba(11, 15, 20, 0.9), transparent);
+  pointer-events: none;
+}
+
+.map-header h1,
+.map-header #status {
+  pointer-events: auto;
+}
+
+.board-link {
+  pointer-events: auto;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+}
+
+/* Leaflet positions markers via CSS transform; adding a transition here makes
+   setLatLng() glide smoothly to the new position instead of snapping instantly. */
+.leaflet-marker-icon.train-icon {
+  transition: transform 4s linear;
+}
+
+.train-marker {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent-7);
+  border: 3px solid var(--status-color, #8b98a5);
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.6);
+}
+
+.legend {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  z-index: 1000;
+  display: flex;
+  gap: 14px;
+  padding: 8px 12px;
+  background: rgba(20, 26, 34, 0.9);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  color: var(--text);
+}
+
+.legend .dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.legend .dot.on-time { background: #2ecc71; }
+.legend .dot.delayed { background: #e0333c; }
+.legend .dot.unknown { background: #8b98a5; }
+
+.leaflet-container {
+  background: #0b0f14;
+}
