@@ -1,0 +1,94 @@
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: #0b0f14;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  cursor: none; /* nobody's using a mouse on a lobby screen */
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+  background: #0b0f14;
+}
+
+.leaflet-container {
+  background: #0b0f14;
+}
+
+/* No zoom controls, attribution kept small and unobtrusive but present (tile provider
+   requires it) — everything else about Leaflet's default chrome is hidden or muted. */
+.leaflet-control-zoom {
+  display: none;
+}
+
+.leaflet-control-attribution {
+  background: rgba(11, 15, 20, 0.6) !important;
+  color: #5a6472 !important;
+  font-size: 10px !important;
+}
+.leaflet-control-attribution a {
+  color: #5a6472 !important;
+}
+
+/* Position is recomputed every 1s (continuous crawl between stations); this transition
+   smooths the per-tick jump into a fluid glide. Disabled during the one-time fitBounds()
+   zoom-in on load so markers don't visibly lag behind the map settling into place. */
+.leaflet-marker-icon.train-icon {
+  transition: transform 1.05s linear;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.leaflet-zoom-anim .leaflet-marker-icon.train-icon {
+  transition: none !important;
+}
+
+#corner {
+  position: absolute;
+  bottom: 20px;
+  right: 24px;
+  z-index: 1000;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  color: #8b98a5;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+}
+
+#clock {
+  color: #e6edf3;
+  font-weight: 600;
+  font-size: 18px;
+}
+
+/* The kiosk view is ALWAYS at full-system zoom (no zooming in) — hundreds of trains
+   share the screen at once, so markers need to be small enough to stay legible as
+   individual dots rather than merging into a glowing blob. Smaller and quieter than
+   the interactive map's markers, not bigger — the track lines carry the "readable from
+   across a room" job, not the train dots. */
+.train-marker {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--route-color, #b933ad);
+  box-shadow:
+    0 0 0 1.5px #0b0f14,
+    0 0 0 3.5px var(--status-color, #8b98a5);
+}
+
+@keyframes kiosk-train-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 1.5px #0b0f14, 0 0 0 3.5px var(--status-color, #8b98a5);
+  }
+  50% {
+    box-shadow: 0 0 0 1.5px #0b0f14, 0 0 0 3.5px var(--status-color, #8b98a5), 0 0 5px 1px var(--status-color, #8b98a5);
+  }
+}
+.train-marker.in-transit {
+  animation: kiosk-train-pulse 1.4s ease-in-out infinite;
+}

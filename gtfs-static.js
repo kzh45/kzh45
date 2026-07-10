@@ -218,6 +218,39 @@ function parseShapeIdsForRoute(routeId) {
   return shapeIdsByDirection;
 }
 
+function metersPerDegree(lat) {
+  return { lat: 111320, lon: 111320 * Math.cos((lat * Math.PI) / 180) };
+}
+
+function distanceMeters([lat1, lon1], [lat2, lon2]) {
+  const { lat: mLat, lon: mLon } = metersPerDegree((lat1 + lat2) / 2);
+  const dy = (lat2 - lat1) * mLat;
+  const dx = (lon2 - lon1) * mLon;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// Evenly-spaced sample points along a shape's length, used as a cheap "fingerprint" to
+// tell genuinely different branches apart from near-duplicate shape variants (e.g. the
+// same physical path with a slightly different terminal turnback).
+function sampleShape(points, sampleCount) {
+  const samples = [points[0]];
+  for (let i = 1; i < sampleCount; i++) {
+    const idx = Math.round((i / (sampleCount - 1)) * (points.length - 1));
+    samples.push(points[idx]);
+  }
+  return samples;
+}
+
+const SHAPE_DEDUP_SAMPLE_COUNT = 8;
+const SHAPE_DEDUP_TOLERANCE_METERS = 300;
+
+function shapesAreSimilar(sampleA, sampleB) {
+  for (let i = 0; i < sampleA.length; i++) {
+    if (distanceMeters(sampleA[i], sampleB[i]) > SHAPE_DEDUP_TOLERANCE_METERS) return false;
+  }
+  return true;
+}
+
 async function parseShapesForRoute(routeId) {
   const shapeIdsByDirection = parseShapeIdsForRoute(routeId);
   const candidateShapeIds = new Set([...shapeIdsByDirection[0], ...shapeIdsByDirection[1]]);
@@ -240,16 +273,30 @@ async function parseShapesForRoute(routeId) {
     pointsByShapeId.get(shapeId).push([Number(lat), Number(lon)]);
   }
 
-  // Multiple shape variants exist per direction (branch/reroute patterns); use the
-  // fullest one as a reasonable stand-in for the main line's track geometry.
+  // Branching lines have several genuinely distinct physical paths per direction (e.g.
+  // the A splitting to Lefferts/Far Rockaway, or N/Q/R/W's different Manhattan
+  // crossings) — picking just one to draw left every station on the other branches
+  // stranded kilometers from the drawn line. Keep one representative per *distinct*
+  // path instead: cluster near-duplicate shape variants (same physical path, minor
+  // differences like a terminal turnback) and keep the most detailed one from each.
   const shapeByDirection = {};
   for (const directionId of [0, 1]) {
-    let best = null;
-    for (const shapeId of shapeIdsByDirection[directionId]) {
-      const points = pointsByShapeId.get(shapeId);
-      if (points && (!best || points.length > best.length)) best = points;
+    const shapes = [...shapeIdsByDirection[directionId]]
+      .map((shapeId) => pointsByShapeId.get(shapeId))
+      .filter((points) => points && points.length >= 2)
+      .map((points) => ({ points, sample: sampleShape(points, SHAPE_DEDUP_SAMPLE_COUNT) }));
+
+    const clusters = []; // [{ representative, sample }]
+    for (const shape of shapes) {
+      const cluster = clusters.find((c) => shapesAreSimilar(c.sample, shape.sample));
+      if (!cluster) {
+        clusters.push({ representative: shape.points, sample: shape.sample });
+      } else if (shape.points.length > cluster.representative.length) {
+        cluster.representative = shape.points;
+      }
     }
-    shapeByDirection[directionId] = best || [];
+
+    shapeByDirection[directionId] = clusters.map((c) => c.representative);
   }
 
   return shapeByDirection;
@@ -421,7 +468,8 @@ async function getAdjacentStopId(routeId, realtimeTripId, targetStopId, now = ne
 // direction_id 1 corresponds to the "S" (Manhattan-bound) platform suffix, 0 to "N".
 const DIRECTION_ID_TO_LETTER = { 0: 'N', 1: 'S' };
 
-// Returns { stations: [{ stopId, name, lat, lon }], track: { N: [[lat,lon],...], S: [...] }, color }
+// Returns { stations: [{ stopId, name, lat, lon }], track: { N: [[[lat,lon],...],...], S: [...] }, color }
+// track.N/S are arrays of polylines (one per distinct physical branch), not a single line.
 async function getGeometry(routeId) {
   const { stations, shapeByDirection, color } = await getLoaded(routeId);
 

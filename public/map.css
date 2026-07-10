@@ -65,6 +65,23 @@ html, body.map-body {
   transition: transform 0.2s ease-out;
 }
 
+/* Real on-screen movement between stations can be just a couple of pixels a second at
+   typical zoom — a pulsing glow on actively-moving trains makes "this one is live" obvious
+   without needing to zoom in tight and stare at it. Animates box-shadow, not transform, so
+   it doesn't fight the zoom-based scale() above. */
+@keyframes train-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 2px #0b0f14, 0 0 0 5px var(--status-color, #8b98a5), 0 0 6px rgba(0, 0, 0, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 0 2px #0b0f14, 0 0 0 5px var(--status-color, #8b98a5), 0 0 10px 5px var(--status-color, #8b98a5);
+  }
+}
+
+.train-marker.in-transit {
+  animation: train-pulse 1.4s ease-in-out infinite;
+}
+
 .legend {
   position: absolute;
   bottom: 16px;
