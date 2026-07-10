@@ -31,9 +31,16 @@ html, body.map-body {
 }
 
 /* Leaflet positions markers via CSS transform; adding a transition here makes
-   setLatLng() glide smoothly to the new position instead of snapping instantly. */
+   setLatLng() glide smoothly to the new position instead of snapping instantly.
+   During zoom, Leaflet repositions markers itself (adding .leaflet-zoom-anim to
+   the map pane) — our transition must be off then, or markers visibly lag/drift
+   behind the map instead of scaling with it. */
 .leaflet-marker-icon.train-icon {
   transition: transform 4s linear;
+}
+
+.leaflet-zoom-anim .leaflet-marker-icon.train-icon {
+  transition: none !important;
 }
 
 .train-marker {
