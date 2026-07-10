@@ -9,6 +9,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import WebMapView from './components/WebMapView';
 import {
   Direction,
   StationGroups,
@@ -23,7 +24,10 @@ const REFRESH_MS = 20000;
 const MAX_RETRY_MS = 60000;
 const MAX_ARRIVALS_SHOWN = 3;
 
+type ViewMode = 'list' | 'map';
+
 export default function App() {
+  const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [direction, setDirection] = useState<Direction>('S');
   const [groups, setGroups] = useState<StationGroups>({});
   const [statusText, setStatusText] = useState('Loading…');
@@ -82,6 +86,26 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="light-content" backgroundColor="#0b0f14" />
+
+      <View style={styles.modeRow}>
+        <Pressable
+          style={[styles.modeBtn, viewMode === 'list' && styles.modeBtnActive]}
+          onPress={() => setViewMode('list')}
+        >
+          <Text style={[styles.modeText, viewMode === 'list' && styles.modeTextActive]}>List</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.modeBtn, viewMode === 'map' && styles.modeBtnActive]}
+          onPress={() => setViewMode('map')}
+        >
+          <Text style={[styles.modeText, viewMode === 'map' && styles.modeTextActive]}>Map</Text>
+        </Pressable>
+      </View>
+
+      {viewMode === 'map' ? (
+        <WebMapView />
+      ) : (
+        <>
       <View style={styles.header}>
         <View style={styles.titleRow}>
           <View style={styles.bullet}>
@@ -140,12 +164,25 @@ export default function App() {
           );
         }}
       />
+        </>
+      )}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#0b0f14' },
+  modeRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, paddingTop: 12 },
+  modeBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#232b36',
+  },
+  modeBtnActive: { backgroundColor: '#141a22', borderColor: '#b933ad' },
+  modeText: { color: '#8b98a5', fontSize: 13, fontWeight: '600' },
+  modeTextActive: { color: '#e6edf3' },
   header: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8 },
   titleRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   bullet: {
