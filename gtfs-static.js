@@ -12,30 +12,52 @@ const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // re-download weekly; MTA republish
 // A real-time NYCT trip_id (e.g. "014000_7..S") embeds the same "<originTime>_<route>..<dir>"
 // substring found inside the corresponding static trip_id (e.g. "L0S1-7-1064-S300_014000_7..S97R").
 // That substring is the key we use to match real-time trips to their scheduled counterpart.
-const TRIP_KEY_RE = /(\d{6}_[^.]+\.\.[NS])/;
+// Most routes use two dots before the direction letter, but the shuttles (GS, FS, H) use one
+// (e.g. "GS.S04R") — accept either.
+const TRIP_KEY_RE = /(\d{6}_[^.]+\.{1,2}[NS])/;
 
-let loaded = null; // { serviceIdsByDate: fn, tripsByKey: Map, stopTimesByTrip: Map }
-let loadingPromise = null;
+// For express/diamond variants (7X, 6X, ...), the static schedule's trip_id embeds the base
+// route letter ("...7..N27R") even though its route_id column says "7X", while the real-time
+// trip_id keeps the "X" ("103200_7X..N"). Strip a trailing X so both sides key the same way —
+// safe because the caller has already filtered to one specific routeId's own static trips.
+function normalizeTripKey(key) {
+  return key.replace(/X(\.{1,2}[NS])$/, '$1');
+}
 
+const loadedByRoute = new Map(); // routeId -> loaded schedule data
+const loadingPromiseByRoute = new Map(); // routeId -> in-flight load promise
+
+let ensureStaticDataPromise = null;
+
+// Multiple routes can call this concurrently (e.g. /api/lines loading 10 routes on a cold
+// cache) — without a single-flight guard here, each would race to download the same zip
+// and rm+extract the same directory at once, risking a corrupted DATA_DIR.
 async function ensureStaticData() {
   const isFresh = fs.existsSync(DATA_DIR) && Date.now() - fs.statSync(DATA_DIR).mtimeMs < MAX_AGE_MS;
   if (isFresh) return;
 
-  fs.mkdirSync(path.dirname(ZIP_PATH), { recursive: true });
-  const response = await fetch(STATIC_GTFS_URL);
-  if (!response.ok) {
-    throw new Error(`Static GTFS download failed: ${response.status} ${response.statusText}`);
-  }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  fs.writeFileSync(ZIP_PATH, buffer);
+  if (!ensureStaticDataPromise) {
+    ensureStaticDataPromise = (async () => {
+      fs.mkdirSync(path.dirname(ZIP_PATH), { recursive: true });
+      const response = await fetch(STATIC_GTFS_URL);
+      if (!response.ok) {
+        throw new Error(`Static GTFS download failed: ${response.status} ${response.statusText}`);
+      }
+      const buffer = Buffer.from(await response.arrayBuffer());
+      fs.writeFileSync(ZIP_PATH, buffer);
 
-  fs.rmSync(DATA_DIR, { recursive: true, force: true });
-  new AdmZip(ZIP_PATH).extractAllTo(DATA_DIR, true);
-  fs.utimesSync(DATA_DIR, new Date(), new Date());
+      fs.rmSync(DATA_DIR, { recursive: true, force: true });
+      new AdmZip(ZIP_PATH).extractAllTo(DATA_DIR, true);
+      fs.utimesSync(DATA_DIR, new Date(), new Date());
+    })().finally(() => {
+      ensureStaticDataPromise = null;
+    });
+  }
+
+  return ensureStaticDataPromise;
 }
 
 function parseCalendar() {
-  const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   const rows = fs
     .readFileSync(path.join(DATA_DIR, 'calendar.txt'), 'utf8')
     .trim()
@@ -82,7 +104,8 @@ function parseTripsForRoute(routeId) {
     .split('\n')
     .slice(1);
 
-  const tripsByKey = new Map(); // key -> [{ tripId, serviceId }]
+  const tripsByKey = new Map(); // "code_route..dir" -> [{ tripId, serviceId }]
+  const tripsByRouteDir = new Map(); // "route..dir" -> [{ code, tripId, serviceId }], sorted by code
   const tripIds = new Set();
 
   for (const line of rows) {
@@ -91,14 +114,25 @@ function parseTripsForRoute(routeId) {
 
     const match = tripId.match(TRIP_KEY_RE);
     if (!match) continue;
+    const key = normalizeTripKey(match[1]);
 
-    const key = match[1];
+    const codeMatch = key.match(/^(\d{6})_(.+)$/);
+    if (!codeMatch) continue;
+    const code = Number(codeMatch[1]);
+    const routeDir = codeMatch[2];
+
     if (!tripsByKey.has(key)) tripsByKey.set(key, []);
     tripsByKey.get(key).push({ tripId, serviceId });
+
+    if (!tripsByRouteDir.has(routeDir)) tripsByRouteDir.set(routeDir, []);
+    tripsByRouteDir.get(routeDir).push({ code, tripId, serviceId });
+
     tripIds.add(tripId);
   }
 
-  return { tripsByKey, tripIds };
+  for (const list of tripsByRouteDir.values()) list.sort((a, b) => a.code - b.code);
+
+  return { tripsByKey, tripsByRouteDir, tripIds };
 }
 
 function timeStringToSeconds(hhmmss) {
@@ -108,6 +142,7 @@ function timeStringToSeconds(hhmmss) {
 
 async function parseStopTimesForTrips(tripIds) {
   const stopTimesByTrip = new Map(); // tripId -> Map(stopId -> scheduledSeconds)
+  const rawSequenceByTrip = new Map(); // tripId -> [{ stopId, sequence }]
 
   const rl = readline.createInterface({
     input: fs.createReadStream(path.join(DATA_DIR, 'stop_times.txt')),
@@ -124,14 +159,23 @@ async function parseStopTimesForTrips(tripIds) {
     const tripId = line.slice(0, commaIndex);
     if (!tripIds.has(tripId)) continue;
 
-    const [, stopId, arrivalTime, departureTime] = line.split(',');
+    const [, stopId, arrivalTime, departureTime, stopSequence] = line.split(',');
     const seconds = timeStringToSeconds(departureTime || arrivalTime);
 
     if (!stopTimesByTrip.has(tripId)) stopTimesByTrip.set(tripId, new Map());
     stopTimesByTrip.get(tripId).set(stopId, seconds);
+
+    if (!rawSequenceByTrip.has(tripId)) rawSequenceByTrip.set(tripId, []);
+    rawSequenceByTrip.get(tripId).push({ stopId, sequence: Number(stopSequence) });
   }
 
-  return stopTimesByTrip;
+  const stopSequenceByTrip = new Map(); // tripId -> [stopId, ...] ordered by stop_sequence
+  for (const [tripId, entries] of rawSequenceByTrip) {
+    entries.sort((a, b) => a.sequence - b.sequence);
+    stopSequenceByTrip.set(tripId, entries.map((e) => e.stopId));
+  }
+
+  return { stopTimesByTrip, stopSequenceByTrip };
 }
 
 function parseStationsForRoute(stopTimesByTrip) {
@@ -211,26 +255,123 @@ async function parseShapesForRoute(routeId) {
   return shapeByDirection;
 }
 
+// The GTFS feed's own routes.txt route_color values are MTA's internal palette, which is
+// slightly muted compared to the vivid colors actually used on subway signage/maps and
+// universally recognized (Citymapper, Google Maps, MTA's own public map all use this set).
+// Keyed by trunk letter — express variants (6X, 7X) share their base route's color.
+const CANONICAL_ROUTE_COLORS = {
+  1: '#EE352E', 2: '#EE352E', 3: '#EE352E',
+  4: '#00933C', 5: '#00933C', 6: '#00933C',
+  7: '#B933AD',
+  A: '#0039A6', C: '#0039A6', E: '#0039A6',
+  B: '#FF6319', D: '#FF6319', F: '#FF6319', M: '#FF6319',
+  G: '#6CBE45',
+  J: '#996633', Z: '#996633',
+  L: '#A7A9AC',
+  N: '#FCCC0A', Q: '#FCCC0A', R: '#FCCC0A', W: '#FCCC0A',
+  GS: '#808183', FS: '#808183', H: '#808183',
+  SI: '#00A1DE',
+};
+
+function parseRouteColor(routeId) {
+  const trunkId = routeId.replace(/X$/, ''); // 6X/7X share their base route's color
+  if (CANONICAL_ROUTE_COLORS[trunkId]) return CANONICAL_ROUTE_COLORS[trunkId];
+
+  const rows = fs
+    .readFileSync(path.join(DATA_DIR, 'routes.txt'), 'utf8')
+    .trim()
+    .split('\n')
+    .slice(1);
+
+  for (const line of rows) {
+    const fields = line.split(',');
+    if (fields[0] === routeId) {
+      const color = fields[fields.length - 3]; // route_color, 3rd-from-last column
+      return color ? `#${color}` : null;
+    }
+  }
+  return null;
+}
+
 async function load(routeId) {
   await ensureStaticData();
   const serviceIdsForDate = parseCalendar();
-  const { tripsByKey, tripIds } = parseTripsForRoute(routeId);
-  const stopTimesByTrip = await parseStopTimesForTrips(tripIds);
+  const { tripsByKey, tripsByRouteDir, tripIds } = parseTripsForRoute(routeId);
+  const { stopTimesByTrip, stopSequenceByTrip } = await parseStopTimesForTrips(tripIds);
   const stations = parseStationsForRoute(stopTimesByTrip);
   const shapeByDirection = await parseShapesForRoute(routeId);
-  return { serviceIdsForDate, tripsByKey, stopTimesByTrip, stations, shapeByDirection };
+  const color = parseRouteColor(routeId);
+  return {
+    serviceIdsForDate, tripsByKey, tripsByRouteDir, stopTimesByTrip, stopSequenceByTrip, stations, shapeByDirection, color,
+  };
 }
 
 async function getLoaded(routeId) {
-  if (loaded) return loaded;
-  if (!loadingPromise) {
-    loadingPromise = load(routeId).catch((err) => {
-      loadingPromise = null; // allow a retry on the next call instead of caching the failure
-      throw err;
-    });
+  if (loadedByRoute.has(routeId)) return loadedByRoute.get(routeId);
+
+  if (!loadingPromiseByRoute.has(routeId)) {
+    loadingPromiseByRoute.set(
+      routeId,
+      load(routeId).catch((err) => {
+        loadingPromiseByRoute.delete(routeId); // allow a retry on the next call instead of caching the failure
+        throw err;
+      })
+    );
   }
-  loaded = await loadingPromise;
-  return loaded;
+
+  const data = await loadingPromiseByRoute.get(routeId);
+  loadedByRoute.set(routeId, data);
+  return data;
+}
+
+// Real-time trips don't always land on an exact scheduled origin-time code (real-world
+// dispatching drifts from the timetable) — this is common on busier/more complex lines.
+// A trip within this many code units (minutes*100, so 800 = 8 minutes) of the target is
+// still considered a match, picking the closest one.
+const FALLBACK_CODE_TOLERANCE = 800;
+
+// Finds the static trip that's both active today-or-yesterday and actually serves the given
+// stop: first by exact origin-time/route/direction code, falling back to the nearest code
+// within tolerance in the same route+direction if no exact match qualifies. Returns the
+// matched static tripId, or null.
+function matchStaticTrip(schedule, realtimeTripId, stopId, now) {
+  const { serviceIdsForDate, tripsByKey, tripsByRouteDir, stopTimesByTrip } = schedule;
+
+  const match = realtimeTripId.match(TRIP_KEY_RE);
+  if (!match) return null;
+  const key = normalizeTripKey(match[1]);
+
+  const today = new Date(now);
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const activeServiceIds = new Set([...serviceIdsForDate(today), ...serviceIdsForDate(yesterday)]);
+
+  const isValidCandidate = (candidate) => {
+    if (!activeServiceIds.has(candidate.serviceId)) return false;
+    const stopTimes = stopTimesByTrip.get(candidate.tripId);
+    return Boolean(stopTimes && stopTimes.has(stopId));
+  };
+
+  for (const candidate of tripsByKey.get(key) || []) {
+    if (isValidCandidate(candidate)) return candidate.tripId;
+  }
+
+  const codeMatch = key.match(/^(\d{6})_(.+)$/);
+  if (!codeMatch) return null;
+  const targetCode = Number(codeMatch[1]);
+  const routeDir = codeMatch[2];
+
+  let best = null;
+  let bestDiff = Infinity;
+  for (const candidate of tripsByRouteDir.get(routeDir) || []) {
+    const diff = Math.abs(candidate.code - targetCode);
+    if (diff > FALLBACK_CODE_TOLERANCE || diff >= bestDiff) continue;
+    if (!isValidCandidate(candidate)) continue;
+    best = candidate;
+    bestDiff = diff;
+  }
+
+  return best ? best.tripId : null;
 }
 
 // Returns the scheduled epoch-ms for a real-time trip at a given stop, or null if no
@@ -244,43 +385,49 @@ async function getScheduledTimeMs(routeId, realtimeTripId, stopId, now = new Dat
     console.error('Static GTFS schedule unavailable:', err.message);
     return null;
   }
-  const { serviceIdsForDate, tripsByKey, stopTimesByTrip } = schedule;
 
-  const match = realtimeTripId.match(TRIP_KEY_RE);
-  if (!match) return null;
-  const key = match[1];
+  const tripId = matchStaticTrip(schedule, realtimeTripId, stopId, now);
+  if (!tripId) return null;
 
-  const candidates = tripsByKey.get(key);
-  if (!candidates || !candidates.length) return null;
+  const scheduledSeconds = schedule.stopTimesByTrip.get(tripId).get(stopId);
+  const serviceDayStart = new Date(now);
+  serviceDayStart.setHours(0, 0, 0, 0);
+  // GTFS times can exceed 24:00:00 for trips continuing past midnight on the same service day.
+  return serviceDayStart.getTime() + scheduledSeconds * 1000;
+}
 
-  const today = new Date(now);
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const activeServiceIds = new Set([...serviceIdsForDate(today), ...serviceIdsForDate(yesterday)]);
-
-  for (const candidate of candidates) {
-    if (!activeServiceIds.has(candidate.serviceId)) continue;
-    const stopTimes = stopTimesByTrip.get(candidate.tripId);
-    if (!stopTimes || !stopTimes.has(stopId)) continue;
-
-    const scheduledSeconds = stopTimes.get(stopId);
-    const serviceDayStart = new Date(today);
-    serviceDayStart.setHours(0, 0, 0, 0);
-    // GTFS times can exceed 24:00:00 for trips continuing past midnight on the same service day.
-    return serviceDayStart.getTime() + scheduledSeconds * 1000;
+// Returns the stop_id immediately before targetStopId in the real, scheduled stop sequence
+// of the matching static trip — correct for branching/skip-stop lines, unlike a hardcoded
+// global station order. Returns null if there's no match or targetStopId is the first stop.
+async function getAdjacentStopId(routeId, realtimeTripId, targetStopId, now = new Date()) {
+  let schedule;
+  try {
+    schedule = await getLoaded(routeId);
+  } catch (err) {
+    console.error('Static GTFS schedule unavailable:', err.message);
+    return null;
   }
 
-  return null;
+  const tripId = matchStaticTrip(schedule, realtimeTripId, targetStopId, now);
+  if (!tripId) return null;
+
+  const sequence = schedule.stopSequenceByTrip.get(tripId);
+  if (!sequence) return null;
+
+  const idx = sequence.indexOf(targetStopId);
+  return idx > 0 ? sequence[idx - 1] : null;
 }
 
 // direction_id 1 corresponds to the "S" (Manhattan-bound) platform suffix, 0 to "N".
 const DIRECTION_ID_TO_LETTER = { 0: 'N', 1: 'S' };
 
-// Returns { stations: [{ stopId, name, lat, lon }], track: { N: [[lat,lon],...], S: [...] } }
+// Returns { stations: [{ stopId, name, lat, lon }], track: { N: [[lat,lon],...], S: [...] }, color }
 async function getGeometry(routeId) {
-  const { stations, shapeByDirection } = await getLoaded(routeId);
+  const { stations, shapeByDirection, color } = await getLoaded(routeId);
 
   return {
+    routeId,
+    color,
     stations: [...stations.entries()].map(([stopId, s]) => ({ stopId, ...s })),
     track: {
       N: shapeByDirection[0],
@@ -289,4 +436,22 @@ async function getGeometry(routeId) {
   };
 }
 
-module.exports = { getScheduledTimeMs, getGeometry, DIRECTION_ID_TO_LETTER };
+// Returns geometry for multiple routes at once: stations deduped across routes (a
+// physical station may be served by several lines), plus each route's own track/color.
+async function getMultiRouteGeometry(routeIds) {
+  const results = await Promise.all(routeIds.map((routeId) => getGeometry(routeId)));
+
+  const stationsById = new Map();
+  for (const r of results) {
+    for (const s of r.stations) {
+      if (!stationsById.has(s.stopId)) stationsById.set(s.stopId, s);
+    }
+  }
+
+  return {
+    stations: [...stationsById.values()],
+    routes: results.map((r) => ({ routeId: r.routeId, color: r.color, track: r.track })),
+  };
+}
+
+module.exports = { getScheduledTimeMs, getAdjacentStopId, getGeometry, getMultiRouteGeometry, DIRECTION_ID_TO_LETTER };

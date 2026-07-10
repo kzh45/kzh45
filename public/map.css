@@ -30,26 +30,35 @@ html, body.map-body {
   background: var(--bg);
 }
 
-/* Leaflet positions markers via CSS transform; adding a transition here makes
-   setLatLng() glide smoothly to the new position instead of snapping instantly.
+/* Position is recomputed every 1s in map.js (continuous crawl between stations);
+   this transition smooths out the small per-tick jump into a fluid glide.
    During zoom, Leaflet repositions markers itself (adding .leaflet-zoom-anim to
    the map pane) — our transition must be off then, or markers visibly lag/drift
    behind the map instead of scaling with it. */
 .leaflet-marker-icon.train-icon {
-  transition: transform 4s linear;
+  transition: transform 1.05s linear;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .leaflet-zoom-anim .leaflet-marker-icon.train-icon {
   transition: none !important;
 }
 
+/* A dark gap between the route-colored fill and the status ring keeps the ring visible
+   even when a route's own color happens to be red/green too (e.g. the 1/2/3 or 4/5/6
+   lines) — without it, a delayed red-line train or on-time green-line train would just
+   look like a flat blob with no visible status indicator. */
 .train-marker {
-  width: 16px;
-  height: 16px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  background: var(--accent-7);
-  border: 3px solid var(--status-color, #8b98a5);
-  box-shadow: 0 0 6px rgba(0, 0, 0, 0.6);
+  background: var(--route-color, var(--accent-7));
+  box-shadow:
+    0 0 0 2px #0b0f14,
+    0 0 0 5px var(--status-color, #8b98a5),
+    0 0 6px rgba(0, 0, 0, 0.6);
 }
 
 .legend {

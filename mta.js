@@ -1,38 +1,62 @@
 require('dotenv').config({ quiet: true });
 const fetch = require('node-fetch');
 const GtfsRealtimeBindings = require('gtfs-realtime-bindings');
-const { getScheduledTimeMs, getGeometry } = require('./gtfs-static');
+const { getScheduledTimeMs, getAdjacentStopId, getGeometry } = require('./gtfs-static');
 
 // A prediction within this many seconds of its scheduled time counts as "on-time".
 const DELAY_THRESHOLD_SECONDS = 120;
 
-// Station order from Flushing to Hudson Yards — used to find a vehicle's previous/next
-// station for position interpolation (the feed gives no real GPS, see gtfs-static.js).
-const STATION_ORDER = [
-  '701', '702', '705', '706', '707', '708', '709', '710', '711', '712', '713',
-  '714', '715', '716', '718', '719', '720', '721', '723', '724', '725', '726',
-];
-
 const VEHICLE_STATUS = { INCOMING_AT: 0, STOPPED_AT: 1, IN_TRANSIT_TO: 2 };
 
-// No GPS is available for NYCT vehicles, so we approximate a position along the track
-// between the previous and next station based on how close the train is to arriving.
-function interpolateVehiclePosition(stations, direction, targetStopId, currentStatus) {
-  const target = stations.get(targetStopId);
+// Used when the previous station has no static-schedule match (rare — e.g. an
+// unscheduled extra train), so we still get some motion instead of a static snap.
+const DEFAULT_SEGMENT_MS = 90 * 1000;
+
+// No GPS is available for NYCT vehicles. Instead of a single guessed point, return a
+// time-bounded segment (previous station -> target station, with real/estimated start
+// and end timestamps) so the client can continuously animate the train's position every
+// second rather than only jumping when new poll data arrives. The previous station comes
+// from the matched trip's own scheduled stop sequence (not a hardcoded line order), so
+// this works correctly on branching/skip-stop lines too.
+async function computeVehicleSegment(routeId, stations, targetStopId, currentStatus, tripId, predictedArrivalMs, delaySeconds, now) {
+  const direction = targetStopId.slice(-1);
+  const targetBaseStopId = targetStopId.slice(0, -1);
+  const target = stations.get(targetBaseStopId);
   if (!target) return null;
-  if (currentStatus === VEHICLE_STATUS.STOPPED_AT) return { lat: target.lat, lon: target.lon };
 
-  const idx = STATION_ORDER.indexOf(targetStopId);
-  const prevIdx = direction === 'S' ? idx - 1 : idx + 1;
-  const prev = idx === -1 || prevIdx < 0 || prevIdx >= STATION_ORDER.length
-    ? null
-    : stations.get(STATION_ORDER[prevIdx]);
-  if (!prev) return { lat: target.lat, lon: target.lon };
+  const atStation = () => ({
+    fromStopId: targetBaseStopId, toStopId: targetBaseStopId, direction,
+    fromLat: target.lat, fromLon: target.lon, toLat: target.lat, toLon: target.lon,
+    fromTimeMs: now, toTimeMs: now,
+  });
 
-  const fraction = currentStatus === VEHICLE_STATUS.INCOMING_AT ? 0.85 : 0.45;
+  if (currentStatus === VEHICLE_STATUS.STOPPED_AT || !predictedArrivalMs) return atStation();
+
+  const prevStopId = await getAdjacentStopId(routeId, tripId, targetStopId, new Date(now));
+  const prevBaseStopId = prevStopId?.slice(0, -1);
+  const prev = prevBaseStopId ? stations.get(prevBaseStopId) : null;
+  if (!prev) return atStation();
+
+  // Reuse the trip's already-known delay to avoid a second async schedule lookup:
+  // scheduled(target) = predicted(target) - delay.
+  const scheduledTargetMs = delaySeconds != null ? predictedArrivalMs - delaySeconds * 1000 : predictedArrivalMs;
+  const scheduledPrevMs = await getScheduledTimeMs(routeId, tripId, prevStopId, new Date(now));
+
+  const segmentDurationMs =
+    scheduledPrevMs != null && scheduledTargetMs - scheduledPrevMs > 0
+      ? scheduledTargetMs - scheduledPrevMs
+      : DEFAULT_SEGMENT_MS;
+
   return {
-    lat: prev.lat + (target.lat - prev.lat) * fraction,
-    lon: prev.lon + (target.lon - prev.lon) * fraction,
+    fromStopId: prevBaseStopId,
+    toStopId: targetBaseStopId,
+    direction,
+    fromLat: prev.lat,
+    fromLon: prev.lon,
+    toLat: target.lat,
+    toLon: target.lon,
+    fromTimeMs: predictedArrivalMs - segmentDurationMs,
+    toTimeMs: predictedArrivalMs,
   };
 }
 
@@ -75,7 +99,37 @@ async function fetchFeed() {
   return inFlight;
 }
 
+// The trip-matching/delay/interpolation work below is the expensive part (hundreds of
+// static-schedule lookups per call) — cache its result per route too, not just the raw
+// feed fetch, so concurrent pollers (web list, map, mobile) within the same 15s window
+// share one computed result instead of each redoing all of it from scratch.
+const routeUpdatesCache = new Map(); // routeId -> { cachedAt, data }
+const routeUpdatesInFlight = new Map(); // routeId -> Promise
+
 async function fetchRouteUpdates(routeId) {
+  const cached = routeUpdatesCache.get(routeId);
+  if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  if (!routeUpdatesInFlight.has(routeId)) {
+    routeUpdatesInFlight.set(
+      routeId,
+      computeRouteUpdates(routeId)
+        .then((data) => {
+          routeUpdatesCache.set(routeId, { cachedAt: Date.now(), data });
+          return data;
+        })
+        .finally(() => {
+          routeUpdatesInFlight.delete(routeId);
+        })
+    );
+  }
+
+  return routeUpdatesInFlight.get(routeId);
+}
+
+async function computeRouteUpdates(routeId) {
   const [{ fetchedAt, entities }, { stations }] = await Promise.all([fetchFeed(), getGeometry(routeId)]);
   const stationById = new Map(stations.map((s) => [s.stopId, s]));
 
@@ -107,6 +161,7 @@ async function fetchRouteUpdates(routeId) {
       const v = entity.vehicle;
       vehicles.push({
         tripId: v.trip?.tripId,
+        routeId,
         stopId: v.stopId,
         currentStatus: v.currentStatus,
       });
@@ -114,22 +169,34 @@ async function fetchRouteUpdates(routeId) {
   }
 
   const stopTimesByTrip = new Map(trips.map((t) => [t.tripId, t.stopTimeUpdates]));
-  for (const v of vehicles) {
-    if (!v.stopId) continue;
-    const direction = v.tripId?.slice(-1);
-    const baseStopId = v.stopId.slice(0, -1);
+  await Promise.all(
+    vehicles.map(async (v) => {
+      if (!v.stopId) return;
 
-    const position = interpolateVehiclePosition(stationById, direction, baseStopId, v.currentStatus);
-    v.lat = position?.lat ?? null;
-    v.lon = position?.lon ?? null;
+      const stopTimes = stopTimesByTrip.get(v.tripId) || [];
+      const stu = stopTimes.find((s) => s.stopId === v.stopId) || stopTimes[0];
+      v.status = stu?.status ?? 'unknown';
+      v.delaySeconds = stu?.delaySeconds ?? null;
 
-    const stopTimes = stopTimesByTrip.get(v.tripId) || [];
-    const stu = stopTimes.find((s) => s.stopId === v.stopId) || stopTimes[0];
-    v.status = stu?.status ?? 'unknown';
-    v.delaySeconds = stu?.delaySeconds ?? null;
-  }
+      const predictedArrivalMs = stu?.arrival || stu?.departure || null;
+      v.segment = await computeVehicleSegment(
+        routeId, stationById, v.stopId, v.currentStatus, v.tripId, predictedArrivalMs, v.delaySeconds, fetchedAt
+      );
+    })
+  );
 
   return { fetchedAt, trips, vehicles };
 }
 
-module.exports = { fetchRouteUpdates };
+// Fetches multiple routes at once. Since fetchFeed() is cached, this costs one network
+// request regardless of how many routeIds share the same underlying feed.
+async function fetchLinesUpdates(routeIds) {
+  const results = await Promise.all(routeIds.map((id) => fetchRouteUpdates(id)));
+  return {
+    fetchedAt: results[0]?.fetchedAt ?? Date.now(),
+    trips: results.flatMap((r) => r.trips),
+    vehicles: results.flatMap((r) => r.vehicles),
+  };
+}
+
+module.exports = { fetchRouteUpdates, fetchLinesUpdates };
