@@ -6,6 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "fetch:7train": "node fetch-7-train.js",
+    "poc:live-status": "node poc-live-status.js",
     "start": "node server.js"
   },
   "keywords": [],
@@ -16,6 +17,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "adm-zip": "^0.5.18",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "gtfs-realtime-bindings": "^2.1.0",

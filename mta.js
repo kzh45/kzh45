@@ -1,6 +1,10 @@
 require('dotenv').config({ quiet: true });
 const fetch = require('node-fetch');
 const GtfsRealtimeBindings = require('gtfs-realtime-bindings');
+const { getScheduledTimeMs } = require('./gtfs-static');
+
+// A prediction within this many seconds of its scheduled time counts as "on-time".
+const DELAY_THRESHOLD_SECONDS = 120;
 
 // The 7 train doesn't have its own feed under the current MTA endpoint —
 // it's bundled into the bare "gtfs" feed alongside 1/2/3/4/5/6/S.
@@ -50,15 +54,24 @@ async function fetchRouteUpdates(routeId) {
   for (const entity of entities) {
     if (entity.tripUpdate && entity.tripUpdate.trip.routeId === routeId) {
       const trip = entity.tripUpdate.trip;
-      trips.push({
-        tripId: trip.tripId,
-        routeId: trip.routeId,
-        stopTimeUpdates: entity.tripUpdate.stopTimeUpdate.map((stu) => ({
-          stopId: stu.stopId,
-          arrival: stu.arrival ? stu.arrival.time * 1000 : null,
-          departure: stu.departure ? stu.departure.time * 1000 : null,
-        })),
-      });
+      const stopTimeUpdates = await Promise.all(
+        entity.tripUpdate.stopTimeUpdate.map(async (stu) => {
+          const arrival = stu.arrival ? stu.arrival.time * 1000 : null;
+          const departure = stu.departure ? stu.departure.time * 1000 : null;
+          const predicted = arrival || departure;
+
+          const scheduled = predicted
+            ? await getScheduledTimeMs(routeId, trip.tripId, stu.stopId)
+            : null;
+          const delaySeconds = scheduled != null ? Math.round((predicted - scheduled) / 1000) : null;
+          const status =
+            delaySeconds == null ? 'unknown' : delaySeconds > DELAY_THRESHOLD_SECONDS ? 'delayed' : 'on-time';
+
+          return { stopId: stu.stopId, arrival, departure, delaySeconds, status };
+        })
+      );
+
+      trips.push({ tripId: trip.tripId, routeId: trip.routeId, stopTimeUpdates });
     } else if (entity.vehicle && entity.vehicle.trip?.routeId === routeId) {
       const v = entity.vehicle;
       vehicles.push({
