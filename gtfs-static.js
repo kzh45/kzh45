@@ -529,4 +529,14 @@ async function getMultiRouteGeometry(routeIds) {
   };
 }
 
-module.exports = { getScheduledTimeMs, getAdjacentStopId, getGeometry, getMultiRouteGeometry, DIRECTION_ID_TO_LETTER };
+module.exports = {
+  getScheduledTimeMs,
+  getAdjacentStopId,
+  getGeometry,
+  getMultiRouteGeometry,
+  DIRECTION_ID_TO_LETTER,
+  // Pure internals exposed for tests only — the trip-ID quirk handling here (express-X
+  // stripping, single-dot shuttles, nearest-code fallback) took real investigation to get
+  // right and is the most regression-prone logic in the codebase.
+  _internal: { TRIP_KEY_RE, normalizeTripKey, matchStaticTrip, FALLBACK_CODE_TOLERANCE },
+};
