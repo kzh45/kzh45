@@ -250,8 +250,10 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   retryBtnText: { color: '#b1201e', fontSize: 13 },
-  pickerRow: { flexGrow: 0, paddingHorizontal: 16, marginBottom: 8 },
-  pickerContent: { gap: 6, paddingRight: 16 },
+  // Horizontal ScrollViews don't reliably size to their children's height — without an
+  // explicit height the 30px chips get clipped at the bottom on device.
+  pickerRow: { flexGrow: 0, height: 40, paddingHorizontal: 16, marginBottom: 6 },
+  pickerContent: { gap: 6, paddingRight: 16, alignItems: 'center' },
   routeChip: {
     width: 30,
     height: 30,
