@@ -290,8 +290,63 @@ async function refresh() {
 
 document.getElementById('retry-btn').addEventListener('click', refresh);
 
+// Service alerts: a chip per affected route; clicking one shows that route's alert text.
+const ALERTS_REFRESH_MS = 60000;
+let activeAlerts = [];
+let selectedAlertRoute = null;
+
+function renderAlerts() {
+  const bar = document.getElementById('alerts-bar');
+  const chips = document.getElementById('alerts-chips');
+  const detail = document.getElementById('alerts-detail');
+
+  const routes = [...new Set(activeAlerts.flatMap((a) => a.routeIds))].sort();
+  if (!routes.length) {
+    bar.hidden = true;
+    detail.hidden = true;
+    return;
+  }
+
+  bar.hidden = false;
+  chips.innerHTML = routes
+    .map((r) => `<button class="alert-chip${r === selectedAlertRoute ? ' selected' : ''}" data-route="${esc(r)}">${bulletHtml(r)}</button>`)
+    .join('');
+  for (const btn of chips.querySelectorAll('.alert-chip')) {
+    btn.addEventListener('click', () => {
+      selectedAlertRoute = selectedAlertRoute === btn.dataset.route ? null : btn.dataset.route;
+      renderAlerts();
+    });
+  }
+
+  if (selectedAlertRoute && routes.includes(selectedAlertRoute)) {
+    const items = activeAlerts.filter((a) => a.routeIds.includes(selectedAlertRoute));
+    detail.innerHTML = items.map((a) => `<div class="alert-item">${esc(a.header)}</div>`).join('');
+    detail.hidden = false;
+  } else {
+    selectedAlertRoute = null;
+    detail.hidden = true;
+  }
+}
+
+async function refreshAlerts() {
+  try {
+    const res = await fetch('/api/alerts');
+    if (res.ok) {
+      activeAlerts = (await res.json()).alerts;
+      renderAlerts();
+    }
+  } catch {
+    // Non-critical overlay — keep showing the last known alerts and retry on schedule.
+  }
+  setTimeout(refreshAlerts, ALERTS_REFRESH_MS);
+}
+refreshAlerts();
+
 loadGeometry()
-  .then(refresh)
+  .then(() => {
+    renderAlerts(); // re-render chips now that real route colors are loaded
+    return refresh();
+  })
   .catch((err) => {
     document.getElementById('status-text').textContent = `Error loading map: ${err.message}`;
   });

@@ -228,6 +228,59 @@ async function fetchLinesUpdates(routeIds) {
   };
 }
 
+// MTA's subway service alerts are published as another GTFS-rt feed (same protobuf
+// FeedMessage shape, entity.alert instead of tripUpdate/vehicle) — fetchFeed's per-URL
+// cache applies as-is.
+const ALERTS_FEED_URL = FEED_BASE + 'camsys%2Fsubway-alerts';
+const KNOWN_ROUTE_IDS = new Set(ALL_ROUTE_IDS);
+
+// Protobuf uint64 timestamps decode as Long objects in some environments and plain
+// numbers in others — coerce either.
+function toEpochSeconds(x) {
+  if (x && typeof x === 'object' && typeof x.toNumber === 'function') return x.toNumber();
+  return Number(x || 0);
+}
+
+function pickTranslation(field) {
+  const t = field?.translation?.find((x) => x.language === 'en') || field?.translation?.[0];
+  return t ? t.text : null;
+}
+
+// Currently-active alerts affecting subway routes we serve, most of the feed is
+// planned-work notices with future active periods — those are filtered out.
+async function fetchServiceAlerts() {
+  const { fetchedAt, entities } = await fetchFeed(ALERTS_FEED_URL);
+  const nowSec = Date.now() / 1000;
+
+  const alerts = [];
+  for (const entity of entities) {
+    const alert = entity.alert;
+    if (!alert) continue;
+
+    const periods = alert.activePeriod || [];
+    const isActive =
+      periods.length === 0 ||
+      periods.some((p) => {
+        const start = toEpochSeconds(p.start);
+        const end = toEpochSeconds(p.end);
+        return start <= nowSec && (!end || end >= nowSec);
+      });
+    if (!isActive) continue;
+
+    const routeIds = [
+      ...new Set((alert.informedEntity || []).map((ie) => ie.routeId).filter((r) => r && KNOWN_ROUTE_IDS.has(r))),
+    ];
+    if (!routeIds.length) continue;
+
+    const header = pickTranslation(alert.headerText);
+    if (!header) continue;
+
+    alerts.push({ id: entity.id, routeIds, header });
+  }
+
+  return { fetchedAt, alerts };
+}
+
 // Next arrivals at one station (base stop ID without the N/S platform suffix), across
 // all routes and both directions. Reads from the same 15s-cached computed results the
 // map polls, so a tap costs no extra upstream fetch.
@@ -269,4 +322,4 @@ async function getStopArrivals(stopBaseId) {
   return { fetchedAt, arrivals: next };
 }
 
-module.exports = { fetchRouteUpdates, fetchLinesUpdates, getStopArrivals, ALL_ROUTE_IDS };
+module.exports = { fetchRouteUpdates, fetchLinesUpdates, getStopArrivals, fetchServiceAlerts, ALL_ROUTE_IDS };

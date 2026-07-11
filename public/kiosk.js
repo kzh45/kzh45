@@ -149,6 +149,58 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// Service alerts, rotating one at a time — a lobby screen has room for the "why is my
+// line red" context that the map markers alone can't carry.
+const ALERTS_REFRESH_MS = 60000;
+const ALERT_ROTATE_MS = 10000;
+let kioskAlerts = [];
+let alertIndex = 0;
+
+function escText(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function alertBullet(routeId) {
+  const color = trackIndex.routeColors.get(routeId) || DEFAULT_ROUTE_COLOR;
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+  const textColor = 0.299 * r + 0.587 * g + 0.114 * b > 160 ? '#0b0f14' : '#fff';
+  return `<span class="alert-bullet" style="background:${color};color:${textColor}">${escText(routeId)}</span>`;
+}
+
+function renderKioskAlert() {
+  const el = document.getElementById('alerts');
+  if (!kioskAlerts.length) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  alertIndex %= kioskAlerts.length;
+  const a = kioskAlerts[alertIndex];
+  const counter = kioskAlerts.length > 1 ? `<span class="alert-counter">${alertIndex + 1}/${kioskAlerts.length}</span>` : '';
+  el.innerHTML = `${a.routeIds.map(alertBullet).join('')}<span class="alert-text">${escText(a.header)}</span>${counter}`;
+}
+
+async function refreshKioskAlerts() {
+  try {
+    const res = await fetch('/api/alerts');
+    if (res.ok) {
+      kioskAlerts = (await res.json()).alerts;
+      renderKioskAlert();
+    }
+  } catch {
+    // Non-critical — keep showing the last known alerts.
+  }
+  setTimeout(refreshKioskAlerts, ALERTS_REFRESH_MS);
+}
+refreshKioskAlerts();
+
+setInterval(() => {
+  if (kioskAlerts.length > 1) {
+    alertIndex++;
+    renderKioskAlert();
+  }
+}, ALERT_ROTATE_MS);
+
 setTimeout(() => location.reload(), AUTO_RELOAD_MS);
 
 loadGeometry()

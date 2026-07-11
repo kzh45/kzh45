@@ -1,7 +1,7 @@
 const express = require('express');
 const path = require('path');
 const compression = require('compression');
-const { fetchRouteUpdates, fetchLinesUpdates, getStopArrivals, ALL_ROUTE_IDS } = require('./mta');
+const { fetchRouteUpdates, fetchLinesUpdates, getStopArrivals, fetchServiceAlerts, ALL_ROUTE_IDS } = require('./mta');
 const { getGeometry, getMultiRouteGeometry } = require('./gtfs-static');
 
 const app = express();
@@ -48,6 +48,15 @@ app.get('/api/lines', async (req, res) => {
     } else {
       res.json({ fetchedAt: data.fetchedAt, vehicles: data.vehicles });
     }
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.get('/api/alerts', async (req, res) => {
+  try {
+    const data = await fetchServiceAlerts();
+    res.json(data);
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
