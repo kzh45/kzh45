@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 const compression = require('compression');
 const { fetchRouteUpdates, fetchLinesUpdates, getStopArrivals, fetchServiceAlerts, ALL_ROUTE_IDS } = require('./mta');
-const { getGeometry, getMultiRouteGeometry } = require('./gtfs-static');
+const { getGeometry, getMultiRouteGeometry, getRouteStations } = require('./gtfs-static');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -48,6 +48,18 @@ app.get('/api/lines', async (req, res) => {
     } else {
       res.json({ fetchedAt: data.fetchedAt, vehicles: data.vehicles });
     }
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.get('/api/routes/:routeId/stations', async (req, res) => {
+  try {
+    const data = await getRouteStations(req.params.routeId);
+    // Station order only changes when the static schedule does (~monthly) — same
+    // caching treatment as geometry.
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.json(data);
   } catch (err) {
     res.status(502).json({ error: err.message });
   }

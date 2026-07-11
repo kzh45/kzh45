@@ -1,40 +1,37 @@
 import Constants from 'expo-constants';
 
-// Station names for the 7 line, keyed by the numeric GTFS stop ID (direction suffix N/S added at lookup time).
-export const STATION_NAMES: Record<number, string> = {
-  701: 'Flushing–Main St',
-  702: 'Mets–Willets Point',
-  705: '111 St',
-  706: '103 St–Corona Plaza',
-  707: 'Junction Blvd',
-  708: '90 St–Elmhurst Av',
-  709: '82 St–Jackson Hts',
-  710: '74 St–Broadway',
-  711: '69 St',
-  712: '61 St–Woodside',
-  713: '52 St',
-  714: '46 St–Bliss St',
-  715: '40 St–Lowery St',
-  716: '33 St–Rawson St',
-  718: 'Queensboro Plaza',
-  719: 'Court Sq–23rd St',
-  720: 'Hunters Point Av',
-  721: 'Vernon Blvd–Jackson Av',
-  723: 'Grand Central–42nd St',
-  724: '5th Av',
-  725: 'Times Sq–42nd St',
-  726: '34th St–Hudson Yards',
+// Boards a rider can pick. Express variants aren't separate entries — picking the 6 or 7
+// folds their diamond trains into the same board, since a rider on the platform cares
+// about both.
+export const PICKER_ROUTES = ['1', '2', '3', '4', '5', '6', '7', 'A', 'C', 'E', 'B', 'D', 'F', 'M', 'G', 'J', 'Z', 'L', 'N', 'Q', 'R', 'W', 'GS', 'FS', 'H'] as const;
+export const EXPRESS_COMPANIONS: Record<string, string> = { 6: '6X', 7: '7X' };
+
+// MTA's canonical public palette (mirrors CANONICAL_ROUTE_COLORS server-side) — a tiny
+// duplicate beats fetching the 180KB geometry payload just to color 25 picker chips.
+export const ROUTE_COLORS: Record<string, string> = {
+  1: '#EE352E', 2: '#EE352E', 3: '#EE352E',
+  4: '#00933C', 5: '#00933C', 6: '#00933C',
+  7: '#B933AD',
+  A: '#0039A6', C: '#0039A6', E: '#0039A6',
+  B: '#FF6319', D: '#FF6319', F: '#FF6319', M: '#FF6319',
+  G: '#6CBE45',
+  J: '#996633', Z: '#996633',
+  L: '#A7A9AC',
+  N: '#FCCC0A', Q: '#FCCC0A', R: '#FCCC0A', W: '#FCCC0A',
+  GS: '#808183', FS: '#808183', H: '#808183',
 };
 
-// Order stations are listed in, from Flushing to Hudson Yards.
-export const STATION_ORDER = Object.keys(STATION_NAMES).map(Number);
-
-export function stationName(stationId: string): string {
-  const numeric = parseInt(stationId, 10);
-  return STATION_NAMES[numeric] || stationId;
+export function textColorFor(color: string): string {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+  return 0.299 * r + 0.587 * g + 0.114 * b > 160 ? '#0b0f14' : '#fff';
 }
 
 export type Direction = 'N' | 'S';
+
+export interface Station {
+  stopId: string;
+  name: string;
+}
 
 export interface StopTimeUpdate {
   stopId: string;
@@ -46,12 +43,6 @@ export interface TripUpdate {
   tripId: string;
   routeId: string;
   stopTimeUpdates: StopTimeUpdate[];
-}
-
-export interface RouteUpdatesResponse {
-  fetchedAt: number;
-  trips: TripUpdate[];
-  vehicles: unknown[];
 }
 
 export type StationGroups = Record<string, Record<Direction, number[]>>;
@@ -94,4 +85,18 @@ export function getApiBaseUrl(): string {
     return `http://${host}:3000`;
   }
   return 'http://localhost:3000';
+}
+
+// Stations for one route in line order (S-direction start -> end), from the backend's
+// schedule-derived ordering. Cached by the browser layer via Cache-Control.
+export async function fetchRouteStations(routeId: string): Promise<Station[]> {
+  const res = await fetch(`${getApiBaseUrl()}/api/routes/${routeId}/stations`);
+  if (!res.ok) throw new Error(`Stations API error ${res.status}`);
+  const data = await res.json();
+  return data.stations;
+}
+
+export function routesParamFor(routeId: string): string {
+  const companion = EXPRESS_COMPANIONS[routeId];
+  return companion ? `${routeId},${companion}` : routeId;
 }

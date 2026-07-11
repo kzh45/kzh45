@@ -3,27 +3,28 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>7 Train Live Arrivals</title>
+<title>NYC Subway Live Arrivals</title>
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 <header>
-  <h1><span class="bullet">7</span> Train — Live Arrivals</h1>
+  <h1><span class="bullet" id="route-bullet">7</span> <span id="board-title">Live Arrivals</span></h1>
   <p id="status">
     <span id="status-spinner" class="spinner" hidden></span>
     <span id="status-text">Loading…</span>
     <button id="retry-btn" type="button" hidden>Retry now</button>
   </p>
+  <div id="route-picker"></div>
   <a class="board-link" href="map.html">Live map</a>
 </header>
 
 <main>
   <section class="column">
-    <h2>Flushing-bound</h2>
+    <h2 id="dir-N-label">Northbound</h2>
     <ul id="board-N" class="board"></ul>
   </section>
   <section class="column">
-    <h2>Manhattan-bound</h2>
+    <h2 id="dir-S-label">Southbound</h2>
     <ul id="board-S" class="board"></ul>
   </section>
 </main>

@@ -4,6 +4,7 @@ import {
   FlatList,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
@@ -12,12 +13,17 @@ import {
 import WebMapView from './components/WebMapView';
 import {
   Direction,
+  EXPRESS_COMPANIONS,
+  PICKER_ROUTES,
+  ROUTE_COLORS,
+  Station,
   StationGroups,
+  fetchRouteStations,
   getApiBaseUrl,
   groupByStationAndDirection,
   minutesUntil,
-  stationName,
-  STATION_ORDER,
+  routesParamFor,
+  textColorFor,
 } from './lib/mta';
 
 const REFRESH_MS = 20000;
@@ -28,6 +34,8 @@ type ViewMode = 'list' | 'map';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<ViewMode>('list');
+  const [route, setRoute] = useState('7');
+  const [stations, setStations] = useState<Station[]>([]);
   const [direction, setDirection] = useState<Direction>('S');
   const [groups, setGroups] = useState<StationGroups>({});
   const [statusText, setStatusText] = useState('Loading…');
@@ -44,7 +52,7 @@ export default function App() {
     setIsLoading(true);
 
     try {
-      const res = await fetch(`${getApiBaseUrl()}/api/7train`);
+      const res = await fetch(`${getApiBaseUrl()}/api/lines?routes=${routesParamFor(route)}&include=trips`);
       if (!res.ok) throw new Error(`API error ${res.status}`);
       const data = await res.json();
 
@@ -68,20 +76,38 @@ export default function App() {
 
       pendingRetryId.current = setTimeout(refresh, retryDelay);
     }
-  }, []);
+  }, [route]);
 
   useEffect(() => {
     mounted.current = true;
+
+    // Route changed: clear the stale board, load the new station order, start polling.
+    setGroups({});
+    setStations([]);
+    fetchRouteStations(route)
+      .then((s) => {
+        if (mounted.current) setStations(s);
+      })
+      .catch(() => {
+        // Board still renders arrivals grouped by stop ID; names just stay blank until retry.
+      });
     refresh();
+
     return () => {
       mounted.current = false;
       if (pendingRetryId.current) clearTimeout(pendingRetryId.current);
     };
-  }, [refresh]);
+  }, [refresh, route]);
 
-  const stationsWithData = STATION_ORDER.filter(
-    (id) => groups[id] && groups[id][direction] && groups[id][direction].length
-  ).map(String);
+  const stationsWithData = stations.filter(
+    (s) => groups[s.stopId] && groups[s.stopId][direction] && groups[s.stopId][direction].length
+  );
+
+  const routeColor = ROUTE_COLORS[route] || '#b933ad';
+  // The S-direction station order starts at the northern terminal — each toggle names
+  // the terminal that direction heads toward.
+  const northLabel = stations.length ? `To ${stations[0].name}` : 'Northbound';
+  const southLabel = stations.length ? `To ${stations[stations.length - 1].name}` : 'Southbound';
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -108,13 +134,13 @@ export default function App() {
         <>
       <View style={styles.header}>
         <View style={styles.titleRow}>
-          <View style={styles.bullet}>
-            <Text style={styles.bulletText}>7</Text>
+          <View style={[styles.bullet, { backgroundColor: routeColor }]}>
+            <Text style={[styles.bulletText, { color: textColorFor(routeColor) }]}>{route}</Text>
           </View>
-          <Text style={styles.title}>Train — Live Arrivals</Text>
+          <Text style={styles.title}>Live Arrivals</Text>
         </View>
         <View style={styles.statusRow}>
-          {isLoading && <ActivityIndicator size="small" color="#b933ad" style={styles.spinner} />}
+          {isLoading && <ActivityIndicator size="small" color={routeColor} style={styles.spinner} />}
           <Text style={[styles.statusText, isError && styles.statusTextError]}>{statusText}</Text>
         </View>
         {isError && (
@@ -124,35 +150,51 @@ export default function App() {
         )}
       </View>
 
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pickerRow} contentContainerStyle={styles.pickerContent}>
+        {PICKER_ROUTES.map((r) => {
+          const color = ROUTE_COLORS[r] || '#8b98a5';
+          const selected = r === route;
+          return (
+            <Pressable
+              key={r}
+              style={[styles.routeChip, { backgroundColor: color }, selected && styles.routeChipSelected]}
+              onPress={() => setRoute(r)}
+            >
+              <Text style={[styles.routeChipText, { color: textColorFor(color) }]}>{r}</Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+
       <View style={styles.toggleRow}>
         <Pressable
           style={[styles.toggleBtn, direction === 'N' && styles.toggleBtnActive]}
           onPress={() => setDirection('N')}
         >
-          <Text style={[styles.toggleText, direction === 'N' && styles.toggleTextActive]}>
-            Flushing-bound
+          <Text style={[styles.toggleText, direction === 'N' && styles.toggleTextActive]} numberOfLines={1}>
+            {northLabel}
           </Text>
         </Pressable>
         <Pressable
           style={[styles.toggleBtn, direction === 'S' && styles.toggleBtnActive]}
           onPress={() => setDirection('S')}
         >
-          <Text style={[styles.toggleText, direction === 'S' && styles.toggleTextActive]}>
-            Manhattan-bound
+          <Text style={[styles.toggleText, direction === 'S' && styles.toggleTextActive]} numberOfLines={1}>
+            {southLabel}
           </Text>
         </Pressable>
       </View>
 
       <FlatList
         data={stationsWithData}
-        keyExtractor={(id) => id}
+        keyExtractor={(s) => s.stopId}
         contentContainerStyle={styles.list}
         ListEmptyComponent={<Text style={styles.empty}>No upcoming trains found.</Text>}
-        renderItem={({ item: stationId }) => {
-          const times = groups[stationId][direction].slice(0, MAX_ARRIVALS_SHOWN);
+        renderItem={({ item: station }) => {
+          const times = groups[station.stopId][direction].slice(0, MAX_ARRIVALS_SHOWN);
           return (
             <View style={styles.station}>
-              <Text style={styles.stationName}>{stationName(stationId)}</Text>
+              <Text style={styles.stationName}>{station.name}</Text>
               <View style={styles.arrivals}>
                 {times.map((t, i) => (
                   <Text key={i} style={[styles.arrivalText, i === 0 && styles.arrivalNext]}>
@@ -189,11 +231,10 @@ const styles = StyleSheet.create({
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: '#b933ad',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  bulletText: { color: 'white', fontWeight: '700', fontSize: 16 },
+  bulletText: { fontWeight: '700', fontSize: 16 },
   title: { color: '#e6edf3', fontSize: 20, fontWeight: '700' },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   spinner: { marginRight: 2 },
@@ -209,10 +250,23 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   retryBtnText: { color: '#b1201e', fontSize: 13 },
+  pickerRow: { flexGrow: 0, paddingHorizontal: 16, marginBottom: 8 },
+  pickerContent: { gap: 6, paddingRight: 16 },
+  routeChip: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    opacity: 0.55,
+  },
+  routeChipSelected: { opacity: 1, borderWidth: 2, borderColor: '#e6edf3' },
+  routeChipText: { fontWeight: '700', fontSize: 12 },
   toggleRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, paddingBottom: 8 },
   toggleBtn: {
     flex: 1,
     paddingVertical: 8,
+    paddingHorizontal: 8,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#232b36',

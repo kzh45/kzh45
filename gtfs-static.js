@@ -502,6 +502,74 @@ async function getTripHeadsign(routeId, realtimeTripId, stopId, now = new Date()
 // direction_id 1 corresponds to the "S" (Manhattan-bound) platform suffix, 0 to "N".
 const DIRECTION_ID_TO_LETTER = { 0: 'N', 1: 'S' };
 
+// Stations a route serves, in line order (S-direction start -> end), derived by
+// topologically merging every scheduled trip's stop sequence. No single trip covers a
+// branching line (the A's Lefferts and Far Rockaway branches are different trips), so
+// consecutive-stop pairs from ALL trips form a precedence graph instead; branch stations
+// come out after their junction. Kahn's algorithm with a preference for the order stops
+// first appear keeps the main trunk reading naturally.
+async function getRouteStations(routeId) {
+  const { stopSequenceByTrip, stations } = await getLoaded(routeId);
+
+  const preferredOrder = new Map(); // base stopId -> first-seen index, for stable tie-breaks
+  const successors = new Map(); // base stopId -> Set(next base stopId)
+  const indegree = new Map();
+
+  const addNode = (id) => {
+    if (!preferredOrder.has(id)) preferredOrder.set(id, preferredOrder.size);
+    if (!indegree.has(id)) indegree.set(id, 0);
+    if (!successors.has(id)) successors.set(id, new Set());
+  };
+
+  // Iterate longest sequences first so the trunk defines the preferred ordering.
+  const sequences = [...stopSequenceByTrip.values()]
+    .filter((seq) => seq.length && seq[0].slice(-1) === 'S')
+    .sort((a, b) => b.length - a.length);
+  // Some services (rare patterns) may only have N-direction data — use it reversed.
+  const usable = sequences.length
+    ? sequences
+    : [...stopSequenceByTrip.values()]
+        .filter((seq) => seq.length)
+        .sort((a, b) => b.length - a.length)
+        .map((seq) => [...seq].reverse());
+
+  for (const seq of usable) {
+    const bases = seq.map((s) => s.slice(0, -1));
+    for (const id of bases) addNode(id);
+    for (let i = 1; i < bases.length; i++) {
+      const [a, b] = [bases[i - 1], bases[i]];
+      if (a !== b && !successors.get(a).has(b)) {
+        successors.get(a).add(b);
+        indegree.set(b, indegree.get(b) + 1);
+      }
+    }
+  }
+
+  const ready = [...indegree.keys()].filter((id) => indegree.get(id) === 0);
+  const ordered = [];
+  while (ready.length) {
+    ready.sort((a, b) => preferredOrder.get(a) - preferredOrder.get(b));
+    const id = ready.shift();
+    ordered.push(id);
+    for (const next of successors.get(id)) {
+      indegree.set(next, indegree.get(next) - 1);
+      if (indegree.get(next) === 0) ready.push(next);
+    }
+  }
+  // Contradictory orderings across service patterns would leave a cycle — append
+  // whatever remains in first-seen order rather than dropping stations.
+  for (const id of preferredOrder.keys()) {
+    if (!ordered.includes(id)) ordered.push(id);
+  }
+
+  return {
+    routeId,
+    stations: ordered
+      .filter((id) => stations.has(id))
+      .map((id) => ({ stopId: id, name: stations.get(id).name })),
+  };
+}
+
 // Returns { stations: [{ stopId, name, lat, lon }], track: { N: [[[lat,lon],...],...], S: [...] }, color }
 // track.N/S are arrays of polylines (one per distinct physical branch), not a single line.
 async function getGeometry(routeId) {
@@ -552,6 +620,7 @@ module.exports = {
   getTripHeadsign,
   getGeometry,
   getMultiRouteGeometry,
+  getRouteStations,
   DIRECTION_ID_TO_LETTER,
   // Pure internals exposed for tests only — the trip-ID quirk handling here (express-X
   // stripping, single-dot shuttles, nearest-code fallback) took real investigation to get

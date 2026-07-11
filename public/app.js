@@ -1,44 +1,37 @@
-// Station names for the 7 line, keyed by the numeric GTFS stop ID (direction suffix N/S added at lookup time).
-const STATION_NAMES = {
-  701: 'Flushing–Main St',
-  702: 'Mets–Willets Point',
-  705: '111 St',
-  706: '103 St–Corona Plaza',
-  707: 'Junction Blvd',
-  708: '90 St–Elmhurst Av',
-  709: '82 St–Jackson Hts',
-  710: '74 St–Broadway',
-  711: '69 St',
-  712: '61 St–Woodside',
-  713: '52 St',
-  714: '46 St–Bliss St',
-  715: '40 St–Lowery St',
-  716: '33 St–Rawson St',
-  718: 'Queensboro Plaza',
-  719: 'Court Sq–23rd St',
-  720: 'Hunters Point Av',
-  721: 'Vernon Blvd–Jackson Av',
-  723: 'Grand Central–42nd St',
-  724: '5th Av',
-  725: 'Times Sq–42nd St',
-  726: '34th St–Hudson Yards',
-};
-
-// Order stations are listed in, from Flushing to Hudson Yards.
-const STATION_ORDER = Object.keys(STATION_NAMES).map(Number);
-
 const REFRESH_MS = 20000;
 const MAX_RETRY_MS = 60000;
 const MAX_ARRIVALS_SHOWN = 3;
 
-function stationName(stopId) {
-  const numeric = parseInt(stopId, 10);
-  return STATION_NAMES[numeric] || stopId;
+// Boards a rider can pick. Express variants aren't separate entries — picking the 6 or 7
+// folds their diamond trains into the same board, since a rider on the platform cares
+// about both.
+const PICKER_ROUTES = ['1', '2', '3', '4', '5', '6', '7', 'A', 'C', 'E', 'B', 'D', 'F', 'M', 'G', 'J', 'Z', 'L', 'N', 'Q', 'R', 'W', 'GS', 'FS', 'H'];
+const EXPRESS_COMPANIONS = { 6: '6X', 7: '7X' };
+
+let currentRoute = localStorage.getItem('boardRoute') || '7';
+if (!PICKER_ROUTES.includes(currentRoute)) currentRoute = '7';
+
+let stationOrder = []; // [{ stopId, name }] in line order (S-direction start -> end)
+let stationNameById = new Map();
+const routeColors = new Map(); // routeId -> "#rrggbb", from the geometry endpoint
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function textColorFor(color) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+  return 0.299 * r + 0.587 * g + 0.114 * b > 160 ? '#0b0f14' : '#fff';
 }
 
 function minutesUntil(timestampMs) {
   const diffMs = timestampMs - Date.now();
   return Math.max(0, Math.round(diffMs / 60000));
+}
+
+function routesParam() {
+  const companion = EXPRESS_COMPANIONS[currentRoute];
+  return companion ? `${currentRoute},${companion}` : currentRoute;
 }
 
 function groupByStationAndDirection(trips) {
@@ -69,8 +62,8 @@ function groupByStationAndDirection(trips) {
 function renderBoard(listEl, groups, direction) {
   listEl.innerHTML = '';
 
-  const stationsWithData = STATION_ORDER.filter(
-    (id) => groups[id] && groups[id][direction] && groups[id][direction].length
+  const stationsWithData = stationOrder.filter(
+    (s) => groups[s.stopId] && groups[s.stopId][direction] && groups[s.stopId][direction].length
   );
 
   if (!stationsWithData.length) {
@@ -81,15 +74,15 @@ function renderBoard(listEl, groups, direction) {
     return;
   }
 
-  for (const stationId of stationsWithData) {
-    const times = groups[stationId][direction].slice(0, MAX_ARRIVALS_SHOWN);
+  for (const station of stationsWithData) {
+    const times = groups[station.stopId][direction].slice(0, MAX_ARRIVALS_SHOWN);
 
     const li = document.createElement('li');
     li.className = 'station';
 
     const nameSpan = document.createElement('span');
     nameSpan.className = 'station-name';
-    nameSpan.textContent = stationName(stationId);
+    nameSpan.textContent = station.name;
 
     const arrivalsSpan = document.createElement('span');
     arrivalsSpan.className = 'arrivals';
@@ -101,6 +94,57 @@ function renderBoard(listEl, groups, direction) {
     li.appendChild(arrivalsSpan);
     listEl.appendChild(li);
   }
+}
+
+function renderPicker() {
+  const picker = document.getElementById('route-picker');
+  picker.innerHTML = PICKER_ROUTES.map((r) => {
+    const color = routeColors.get(r) || '#8b98a5';
+    const selected = r === currentRoute ? ' selected' : '';
+    return `<button class="route-chip${selected}" data-route="${esc(r)}" style="background:${color};color:${textColorFor(color)}">${esc(r)}</button>`;
+  }).join('');
+  for (const btn of picker.querySelectorAll('.route-chip')) {
+    btn.addEventListener('click', () => selectRoute(btn.dataset.route));
+  }
+}
+
+function renderTitle() {
+  const bullet = document.getElementById('route-bullet');
+  const color = routeColors.get(currentRoute) || '#b933ad';
+  bullet.textContent = currentRoute;
+  bullet.style.background = color;
+  bullet.style.color = textColorFor(color);
+}
+
+async function selectRoute(routeId) {
+  currentRoute = routeId;
+  localStorage.setItem('boardRoute', routeId);
+  renderPicker();
+  renderTitle();
+
+  document.getElementById('board-N').innerHTML = '';
+  document.getElementById('board-S').innerHTML = '';
+  document.getElementById('status-text').textContent = 'Loading…';
+
+  try {
+    const res = await fetch(`/api/routes/${routeId}/stations`);
+    if (!res.ok) throw new Error(`Stations API error ${res.status}`);
+    const { stations } = await res.json();
+    if (routeId !== currentRoute) return; // user picked another route mid-fetch
+
+    stationOrder = stations;
+    stationNameById = new Map(stations.map((s) => [s.stopId, s.name]));
+
+    // The S-direction sequence starts at the line's northern terminal and ends at its
+    // southern one — so each board's header names the terminal it's heading toward.
+    document.getElementById('dir-N-label').textContent = stations.length ? `To ${stations[0].name}` : 'Northbound';
+    document.getElementById('dir-S-label').textContent = stations.length ? `To ${stations[stations.length - 1].name}` : 'Southbound';
+  } catch (err) {
+    document.getElementById('status-text').textContent = `Error loading stations: ${err.message}`;
+    return;
+  }
+
+  refresh();
 }
 
 let consecutiveErrors = 0;
@@ -116,10 +160,12 @@ async function refresh() {
   spinner.hidden = false;
   retryBtn.hidden = true;
 
+  const routeAtFetch = currentRoute;
   try {
-    const res = await fetch('/api/7train');
+    const res = await fetch(`/api/lines?routes=${routesParam()}&include=trips`);
     if (!res.ok) throw new Error(`API error ${res.status}`);
     const data = await res.json();
+    if (routeAtFetch !== currentRoute) return; // superseded by a route switch
 
     const groups = groupByStationAndDirection(data.trips);
     renderBoard(document.getElementById('board-N'), groups, 'N');
@@ -132,6 +178,7 @@ async function refresh() {
 
     pendingRetryId = setTimeout(refresh, REFRESH_MS);
   } catch (err) {
+    if (routeAtFetch !== currentRoute) return;
     consecutiveErrors += 1;
     const retryDelay = Math.min(REFRESH_MS * 2 ** consecutiveErrors, MAX_RETRY_MS);
 
@@ -146,4 +193,17 @@ async function refresh() {
 
 document.getElementById('retry-btn').addEventListener('click', refresh);
 
-refresh();
+(async () => {
+  try {
+    const res = await fetch('/api/lines/geometry');
+    if (res.ok) {
+      const { routes } = await res.json();
+      for (const r of routes) if (r.color) routeColors.set(r.routeId, r.color);
+    }
+  } catch {
+    // Picker falls back to gray chips; boards still work.
+  }
+  renderPicker();
+  renderTitle();
+  selectRoute(currentRoute);
+})();
