@@ -24,7 +24,7 @@ function normalizeTripKey(key) {
   return key.replace(/X(\.{1,2}[NS])$/, '$1');
 }
 
-const loadedByRoute = new Map(); // routeId -> loaded schedule data
+const loadedByRoute = new Map(); // routeId -> { data: loaded schedule, loadedAtMs }
 const loadingPromiseByRoute = new Map(); // routeId -> in-flight load promise
 
 let ensureStaticDataPromise = null;
@@ -353,8 +353,25 @@ async function load(routeId) {
   };
 }
 
+const refreshingRoutes = new Set(); // routes with a background re-parse in flight
+
 async function getLoaded(routeId) {
-  if (loadedByRoute.has(routeId)) return loadedByRoute.get(routeId);
+  const entry = loadedByRoute.get(routeId);
+  if (entry) {
+    // Without this, a long-running server would keep serving whatever schedule it parsed
+    // at startup forever — load() (and the weekly zip re-download inside ensureStaticData)
+    // is only reached on a cache miss, and entries were never invalidated. Refresh
+    // stale-while-revalidate style: keep serving the old parse (schedules drift slowly,
+    // ~monthly republish) rather than stalling live requests on the ~7s re-parse.
+    if (Date.now() - entry.loadedAtMs > MAX_AGE_MS && !refreshingRoutes.has(routeId)) {
+      refreshingRoutes.add(routeId);
+      load(routeId)
+        .then((data) => loadedByRoute.set(routeId, { data, loadedAtMs: Date.now() }))
+        .catch((err) => console.error(`Background schedule refresh failed for ${routeId}:`, err.message))
+        .finally(() => refreshingRoutes.delete(routeId));
+    }
+    return entry.data;
+  }
 
   if (!loadingPromiseByRoute.has(routeId)) {
     loadingPromiseByRoute.set(
@@ -367,7 +384,7 @@ async function getLoaded(routeId) {
   }
 
   const data = await loadingPromiseByRoute.get(routeId);
-  loadedByRoute.set(routeId, data);
+  loadedByRoute.set(routeId, { data, loadedAtMs: Date.now() });
   return data;
 }
 

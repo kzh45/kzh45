@@ -13,6 +13,10 @@ const PORT = process.env.PORT || 3000;
 app.use(compression());
 app.use(express.static(path.join(__dirname, 'public')));
 
+app.get('/healthz', (req, res) => {
+  res.json({ ok: true, uptimeSeconds: Math.round(process.uptime()) });
+});
+
 app.get('/api/7train', async (req, res) => {
   try {
     const data = await fetchRouteUpdates('7');
