@@ -31,19 +31,23 @@ map.on('zoomend', () => mapEl.classList.remove('zooming'));
 const vehicleMarkers = new Map(); // tripId -> L.marker
 const vehicleSegments = new Map(); // tripId -> { routeId, segment, status, delaySeconds, currentStatus, destination }
 const stationNamesById = new Map(); // base stopId -> station name
+const routePolylines = new Map(); // routeId -> [L.polyline per branch]
 const trackIndex = createTrackIndex();
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Light route colors (N/Q/R/W yellow, L gray) use dark text on real MTA signage — white
+// would be unreadable on them.
+function textColorFor(color) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+  return 0.299 * r + 0.587 * g + 0.114 * b > 160 ? '#0b0f14' : '#fff';
+}
+
 function bulletHtml(routeId) {
   const color = trackIndex.routeColors.get(routeId) || DEFAULT_ROUTE_COLOR;
-  // Light bullets (N/Q/R/W yellow, L gray) use dark text on real MTA signage — white
-  // would be unreadable on them.
-  const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
-  const textColor = 0.299 * r + 0.587 * g + 0.114 * b > 160 ? '#0b0f14' : '#fff';
-  return `<span class="popup-bullet" style="background:${color};color:${textColor}">${esc(routeId)}</span>`;
+  return `<span class="popup-bullet" style="background:${color};color:${textColorFor(color)}">${esc(routeId)}</span>`;
 }
 
 function statusHtml(status, delaySeconds) {
@@ -92,11 +96,17 @@ function renderStationPopup(stationName, arrivals) {
 // Actual on-screen movement can be just a couple of pixels a second at typical zoom —
 // too subtle to notice at a glance. A pulsing glow on actively-moving trains (anything
 // other than STOPPED_AT) makes "this one is live" obvious independent of that.
-function trainIcon(status, routeColor, currentStatus) {
+// Express variants (6X/7X) render as diamonds with the base number, matching the real
+// <7> diamond convention on MTA signage; all trains carry their route letter/number.
+function trainIcon(status, routeColor, currentStatus, routeId) {
   const movingClass = currentStatus !== VEHICLE_STATUS_STOPPED_AT ? ' in-transit' : '';
+  const isExpress = /X$/.test(routeId);
+  const shapeClass = isExpress ? ' diamond' : '';
+  const label = isExpress ? routeId.slice(0, -1) : routeId;
+  const color = routeColor || DEFAULT_ROUTE_COLOR;
   return L.divIcon({
     className: 'train-icon',
-    html: `<div class="train-marker${movingClass}" style="--route-color: ${routeColor || DEFAULT_ROUTE_COLOR}; --status-color: ${STATUS_COLOR[status] || STATUS_COLOR.unknown}"></div>`,
+    html: `<div class="train-marker${movingClass}${shapeClass}" style="--route-color: ${color}; --status-color: ${STATUS_COLOR[status] || STATUS_COLOR.unknown}; color: ${textColorFor(color)}"><span class="train-label">${esc(label)}</span></div>`,
     iconSize: [24, 24],
     iconAnchor: [12, 12],
   });
@@ -139,10 +149,13 @@ async function loadGeometry() {
     // Each distinct branch gets its own polyline — a route with 3 physical branches draws
     // 3 lines instead of forcing everything onto whichever single shape happened to be
     // picked, which previously stranded stations on other branches far off the drawn line.
+    // References are kept per route so alert selection can highlight the affected track.
+    const lines = [];
     const shapes = [...(route.track.N || []), ...(route.track.S || [])];
     for (const shape of shapes) {
-      L.polyline(shape, { color: route.color || DEFAULT_ROUTE_COLOR, weight: 3, opacity: 0.6 }).addTo(map);
+      lines.push(L.polyline(shape, { color: route.color || DEFAULT_ROUTE_COLOR, weight: 3, opacity: 0.6 }).addTo(map));
     }
+    routePolylines.set(route.routeId, lines);
   }
 
   const stationLayer = L.layerGroup();
@@ -160,6 +173,7 @@ async function loadGeometry() {
       .bindTooltip(station.name, { direction: 'top' })
       .bindPopup('Loading…', { maxWidth: 300 })
       .addTo(stationLayer);
+    marker.stationName = station.name; // read back when rebinding tooltips at the label-zoom threshold
 
     // Arrivals are fetched fresh on every open — the popup may sit open a while, but
     // the times shown are from tap time, which matches rider expectations ("what's
@@ -182,7 +196,10 @@ async function loadGeometry() {
   // At a zoomed-out, city-wide view, hundreds of station dots across dozens of lines is
   // mostly clutter — only show them once zoomed in enough to actually tell stations apart,
   // and scale their size down at the lower end of that range so they stay unobtrusive.
+  // Zoomed in further still, switch the hover tooltips to always-visible name labels.
   const STATION_VISIBILITY_ZOOM = 12;
+  const STATION_LABEL_ZOOM = 14;
+  let labelsShown = false;
   function radiusForZoom(zoom) {
     return Math.min(6, Math.max(2, zoom - 9));
   }
@@ -196,6 +213,22 @@ async function loadGeometry() {
     if (shouldShow) {
       const radius = radiusForZoom(zoom);
       for (const marker of stationMarkers) marker.setRadius(radius);
+    }
+
+    // A tooltip's permanence can't be toggled in place — rebind when crossing the
+    // threshold (only then; rebinding 475 tooltips on every zoomend would churn the DOM).
+    const shouldLabel = zoom >= STATION_LABEL_ZOOM;
+    if (shouldLabel !== labelsShown) {
+      labelsShown = shouldLabel;
+      for (const marker of stationMarkers) {
+        marker.unbindTooltip();
+        marker.bindTooltip(
+          marker.stationName,
+          shouldLabel
+            ? { permanent: true, direction: 'right', offset: [8, 0], className: 'station-label' }
+            : { direction: 'top' }
+        );
+      }
     }
   }
   map.on('zoomend', updateStationDisplay);
@@ -224,13 +257,13 @@ function updateVehicles(vehicles) {
       // WebViews commonly throttle/pause JS timers when not the frontmost active view,
       // which would otherwise freeze a marker mid-segment until the timer resumes (then
       // jump). Resyncing here bounds any such freeze to at most one poll interval.
-      existing.setIcon(trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus));
+      existing.setIcon(trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus, v.routeId));
       existing.setLatLng(trackIndex.positionAlongSegment(v.routeId, v.segment, now));
       if (existing.isPopupOpen()) existing.setPopupContent(renderTrainPopup(v.tripId));
     } else {
       const tooltip = v.destination ? `${v.routeId} train → ${v.destination}` : `${v.routeId} train`;
       const marker = L.marker(trackIndex.positionAlongSegment(v.routeId, v.segment, now), {
-        icon: trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus),
+        icon: trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus, v.routeId),
       })
         .bindTooltip(tooltip, { direction: 'top' })
         .bindPopup(() => renderTrainPopup(v.tripId), { maxWidth: 300 })
@@ -290,10 +323,27 @@ async function refresh() {
 
 document.getElementById('retry-btn').addEventListener('click', refresh);
 
-// Service alerts: a chip per affected route; clicking one shows that route's alert text.
+// Service alerts: a chip per affected route; clicking one shows that route's alert text
+// and highlights the affected track on the map.
 const ALERTS_REFRESH_MS = 60000;
 let activeAlerts = [];
 let selectedAlertRoute = null;
+
+// Express variants share their base route's physical track (7 and 7X, 6 and 6X) — an
+// alert for either should light up the same line, not leave a dimmed twin underneath.
+function sameTrunk(a, b) {
+  return a.replace(/X$/, '') === b.replace(/X$/, '');
+}
+
+function applyAlertHighlight() {
+  for (const [routeId, lines] of routePolylines) {
+    let style;
+    if (!selectedAlertRoute) style = { weight: 3, opacity: 0.6 };
+    else if (sameTrunk(routeId, selectedAlertRoute)) style = { weight: 6, opacity: 1 };
+    else style = { weight: 3, opacity: 0.12 };
+    for (const line of lines) line.setStyle(style);
+  }
+}
 
 function renderAlerts() {
   const bar = document.getElementById('alerts-bar');
@@ -304,6 +354,8 @@ function renderAlerts() {
   if (!routes.length) {
     bar.hidden = true;
     detail.hidden = true;
+    selectedAlertRoute = null;
+    applyAlertHighlight(); // clear any leftover track highlight if alerts expired while selected
     return;
   }
 
@@ -326,7 +378,21 @@ function renderAlerts() {
     selectedAlertRoute = null;
     detail.hidden = true;
   }
+
+  applyAlertHighlight();
 }
+
+// Clicking anywhere outside the alerts UI (including the map itself) dismisses the
+// open alert panel and its track highlight. Must be pointerdown, not click: a chip's
+// own click handler re-renders the chip row, so by the time a click event bubbles up
+// here its target is detached from the DOM and closest('#alerts-bar') can no longer
+// prove the press started inside the bar — every chip click would self-dismiss.
+document.addEventListener('pointerdown', (e) => {
+  if (selectedAlertRoute && !e.target.closest('#alerts-bar') && !e.target.closest('#alerts-detail')) {
+    selectedAlertRoute = null;
+    renderAlerts();
+  }
+});
 
 async function refreshAlerts() {
   try {

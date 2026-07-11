@@ -115,10 +115,31 @@ html, body.map-body {
     0 0 0 2px #0b0f14,
     0 0 0 5px var(--status-color, #8b98a5),
     0 0 6px rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   /* Set on #map and inherited down, so all train markers shrink together at low zoom
      instead of piling up into an undifferentiated cluster of full-size dots. */
   transform: scale(var(--marker-scale, 1));
   transition: transform 0.2s ease-out;
+}
+
+.train-label {
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.5px;
+  user-select: none;
+}
+
+/* Express variants (6X/7X) render as diamonds — the real <7> convention on MTA signage.
+   The rotate combines with the zoom scale; the label counter-rotates to stay upright. */
+.train-marker.diamond {
+  border-radius: 2px;
+  transform: scale(var(--marker-scale, 1)) rotate(45deg);
+}
+.train-marker.diamond .train-label {
+  transform: rotate(-45deg);
 }
 
 /* Real on-screen movement between stations can be just a couple of pixels a second at
@@ -168,6 +189,22 @@ html, body.map-body {
 
 .leaflet-container {
   background: #0b0f14;
+}
+
+/* Always-visible station name labels at high zoom (Leaflet's default tooltip is a
+   white box with an arrow — restyle to quiet dark tags that sit beside the dots). */
+.leaflet-tooltip.station-label {
+  background: rgba(11, 15, 20, 0.75);
+  color: #e6edf3;
+  border: none;
+  box-shadow: none;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+}
+.leaflet-tooltip.station-label::before {
+  display: none;
 }
 
 /* Dark-theme popups (train details / station arrivals) — Leaflet's default is white. */
