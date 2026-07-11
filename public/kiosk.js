@@ -33,11 +33,22 @@ function trainIcon(status, routeColor, currentStatus) {
   });
 }
 
+// Same right-hand-running offset as the interactive map (see map.js) — scaled for the
+// kiosk's smaller markers. Zoom is undefined until fitBounds resolves in loadGeometry.
+const TRAIN_OFFSET_PX = 3;
+const NYC_LAT_RAD = (40.75 * Math.PI) / 180;
+function trainOffsetMeters() {
+  const zoom = map.getZoom();
+  if (zoom === undefined) return 0;
+  return (TRAIN_OFFSET_PX * 156543.03392 * Math.cos(NYC_LAT_RAD)) / 2 ** zoom;
+}
+
 function tickVehiclePositions() {
   const now = Date.now();
+  const offset = trainOffsetMeters();
   for (const [tripId, { routeId, segment }] of vehicleSegments) {
     const marker = vehicleMarkers.get(tripId);
-    if (marker) marker.setLatLng(trackIndex.positionAlongSegment(routeId, segment, now));
+    if (marker) marker.setLatLng(trackIndex.positionAlongSegment(routeId, segment, now, offset));
   }
 }
 setInterval(tickVehiclePositions, 1000);
@@ -78,9 +89,9 @@ function updateVehicles(vehicles) {
       // marker mid-segment until the timer resumes (then jump). Resyncing here bounds
       // any such freeze to at most one poll interval.
       existing.setIcon(trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus));
-      existing.setLatLng(trackIndex.positionAlongSegment(v.routeId, v.segment, now));
+      existing.setLatLng(trackIndex.positionAlongSegment(v.routeId, v.segment, now, trainOffsetMeters()));
     } else {
-      const marker = L.marker(trackIndex.positionAlongSegment(v.routeId, v.segment, now), {
+      const marker = L.marker(trackIndex.positionAlongSegment(v.routeId, v.segment, now, trainOffsetMeters()), {
         icon: trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus),
       }).addTo(map);
       vehicleMarkers.set(v.tripId, marker);

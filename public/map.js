@@ -112,14 +112,26 @@ function trainIcon(status, routeColor, currentStatus, routeId) {
   });
 }
 
+// Trains are drawn offset a few pixels to the RIGHT of their direction of travel
+// (right-hand running, as NYC trains actually operate) — uptown and downtown trains
+// ride on opposite sides of the single drawn line instead of overlapping. The offset
+// is fixed in screen pixels, so the equivalent distance in meters depends on zoom.
+const TRAIN_OFFSET_PX = 4;
+const NYC_LAT_RAD = (40.75 * Math.PI) / 180;
+function trainOffsetMeters() {
+  // Web-mercator meters-per-pixel at NYC's latitude for the current zoom.
+  return (TRAIN_OFFSET_PX * 156543.03392 * Math.cos(NYC_LAT_RAD)) / 2 ** map.getZoom();
+}
+
 // Ticks every second so trains crawl continuously between stations instead of only
 // jumping when a new poll arrives every REFRESH_MS.
 function tickVehiclePositions() {
   const now = Date.now();
+  const offset = trainOffsetMeters();
   for (const [tripId, { routeId, segment }] of vehicleSegments) {
     const marker = vehicleMarkers.get(tripId);
     if (!marker) continue;
-    const pos = trackIndex.positionAlongSegment(routeId, segment, now);
+    const pos = trackIndex.positionAlongSegment(routeId, segment, now, offset);
     marker.setLatLng(pos);
     // Leaflet doesn't move an already-open popup along with its marker — keep the (at
     // most one) open train popup glued to the train, with its ETA counting down live.
@@ -130,6 +142,9 @@ function tickVehiclePositions() {
   }
 }
 setInterval(tickVehiclePositions, 1000);
+// The pixel-constant offset means positions shift slightly with zoom — resync right
+// after a zoom settles instead of waiting up to a second for the next tick.
+map.on('zoomend', tickVehiclePositions);
 
 // The 1s interval itself can get throttled while backgrounded (mobile WebViews especially)
 // and browsers don't reliably fire it the instant a page becomes visible again — force an
@@ -258,11 +273,11 @@ function updateVehicles(vehicles) {
       // which would otherwise freeze a marker mid-segment until the timer resumes (then
       // jump). Resyncing here bounds any such freeze to at most one poll interval.
       existing.setIcon(trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus, v.routeId));
-      existing.setLatLng(trackIndex.positionAlongSegment(v.routeId, v.segment, now));
+      existing.setLatLng(trackIndex.positionAlongSegment(v.routeId, v.segment, now, trainOffsetMeters()));
       if (existing.isPopupOpen()) existing.setPopupContent(renderTrainPopup(v.tripId));
     } else {
       const tooltip = v.destination ? `${v.routeId} train → ${v.destination}` : `${v.routeId} train`;
-      const marker = L.marker(trackIndex.positionAlongSegment(v.routeId, v.segment, now), {
+      const marker = L.marker(trackIndex.positionAlongSegment(v.routeId, v.segment, now, trainOffsetMeters()), {
         icon: trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus, v.routeId),
       })
         .bindTooltip(tooltip, { direction: 'top' })

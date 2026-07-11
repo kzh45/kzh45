@@ -46,9 +46,12 @@ function bestShapeMatchForStation(shapes, lat, lon) {
   return best;
 }
 
-function pointAtDistance(subPath, targetDist) {
+// Returns { point: [lat,lon], bearing: [ux,uy] | null } — bearing is a unit vector of
+// the direction of travel in meters-space (x east, y north) at that distance along the
+// path, used to offset trains to the right of their travel direction.
+function pointAndBearingAtDistance(subPath, targetDist) {
   const { points, cumDist, total } = subPath;
-  if (total === 0) return points[0];
+  if (total === 0) return { point: points[0], bearing: null };
   const clamped = Math.min(total, Math.max(0, targetDist));
 
   for (let i = 1; i < cumDist.length; i++) {
@@ -57,10 +60,33 @@ function pointAtDistance(subPath, targetDist) {
       const segFraction = segLen > 0 ? (clamped - cumDist[i - 1]) / segLen : 0;
       const [lat1, lon1] = points[i - 1];
       const [lat2, lon2] = points[i];
-      return [lat1 + (lat2 - lat1) * segFraction, lon1 + (lon2 - lon1) * segFraction];
+      const point = [lat1 + (lat2 - lat1) * segFraction, lon1 + (lon2 - lon1) * segFraction];
+      return { point, bearing: bearingBetween([lat1, lon1], [lat2, lon2]) };
     }
   }
-  return points[points.length - 1];
+  return {
+    point: points[points.length - 1],
+    bearing: bearingBetween(points[points.length - 2] || points[points.length - 1], points[points.length - 1]),
+  };
+}
+
+function bearingBetween([lat1, lon1], [lat2, lon2]) {
+  const { lat: mLat, lon: mLon } = metersPerDegree((lat1 + lat2) / 2);
+  const dx = (lon2 - lon1) * mLon;
+  const dy = (lat2 - lat1) * mLat;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  return len > 0 ? [dx / len, dy / len] : null;
+}
+
+// Shift a point perpendicular to the direction of travel, to the RIGHT (right-hand
+// running, as NYC trains actually operate) — so uptown and downtown trains ride on
+// opposite sides of the single drawn line instead of overlapping.
+function offsetRightOfTravel([lat, lon], bearing, meters) {
+  if (!bearing || !meters) return [lat, lon];
+  const [ux, uy] = bearing;
+  const { lat: mLat, lon: mLon } = metersPerDegree(lat);
+  // Right of (ux, uy) is (uy, -ux).
+  return [lat + (-ux * meters) / mLat, lon + (uy * meters) / mLon];
 }
 
 // Encapsulates the route/track/station lookups needed to place a train's position along
@@ -127,18 +153,47 @@ function createTrackIndex() {
     return result;
   }
 
-  function positionAlongSegment(routeId, segment, now) {
+  // Direction of travel at a station platform, from the local slope of the track shape
+  // that station matched — lets trains dwelling at a stop offset to their side too
+  // (that's exactly when opposing trains are most likely to sit on the same spot).
+  function bearingAtStation(routeId, direction, baseStopId) {
+    const match = stationIndexByRoute.get(routeId)?.[direction]?.get(baseStopId);
+    if (!match) return null;
+    const shape = trackByRoute.get(routeId)?.[direction]?.[match.shapeIdx];
+    if (!shape || shape.length < 2) return null;
+    const i = Math.min(match.pointIdx, shape.length - 2);
+    return bearingBetween(shape[i], shape[i + 1]);
+  }
+
+  // offsetMeters shifts the returned position perpendicular-right of the direction of
+  // travel (right-hand running). Pass a zoom-derived value to keep the on-screen offset
+  // pixel-constant; 0 disables it.
+  function positionAlongSegment(routeId, segment, now, offsetMeters = 0) {
+    // Dwelling at a station: no path to interpolate, but still offset by the local
+    // track bearing so opposing trains at the same stop separate visually.
+    if (segment.fromStopId === segment.toStopId) {
+      const point = [segment.toLat, segment.toLon];
+      if (!offsetMeters) return point;
+      return offsetRightOfTravel(point, bearingAtStation(routeId, segment.direction, segment.toStopId), offsetMeters);
+    }
+
     const duration = segment.toTimeMs - segment.fromTimeMs;
     const fraction = duration > 0 ? Math.min(1, Math.max(0, (now - segment.fromTimeMs) / duration)) : 1;
 
     const subPath = getSubPath(routeId, segment.direction, segment.fromStopId, segment.toStopId);
-    if (subPath) return pointAtDistance(subPath, subPath.total * fraction);
+    if (subPath) {
+      const { point, bearing } = pointAndBearingAtDistance(subPath, subPath.total * fraction);
+      return offsetMeters ? offsetRightOfTravel(point, bearing, offsetMeters) : point;
+    }
 
     // Fall back to a straight line if the track/station lookup wasn't available.
-    return [
+    const point = [
       segment.fromLat + (segment.toLat - segment.fromLat) * fraction,
       segment.fromLon + (segment.toLon - segment.fromLon) * fraction,
     ];
+    if (!offsetMeters) return point;
+    const bearing = bearingBetween([segment.fromLat, segment.fromLon], [segment.toLat, segment.toLon]);
+    return offsetRightOfTravel(point, bearing, offsetMeters);
   }
 
   return { trackByRoute, stationIndexByRoute, routeColors, addRoute, getSubPath, positionAlongSegment };
