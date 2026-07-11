@@ -29,8 +29,65 @@ map.on('zoomstart', () => mapEl.classList.add('zooming'));
 map.on('zoomend', () => mapEl.classList.remove('zooming'));
 
 const vehicleMarkers = new Map(); // tripId -> L.marker
-const vehicleSegments = new Map(); // tripId -> { routeId, segment }
+const vehicleSegments = new Map(); // tripId -> { routeId, segment, status, delaySeconds, currentStatus, destination }
+const stationNamesById = new Map(); // base stopId -> station name
 const trackIndex = createTrackIndex();
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function bulletHtml(routeId) {
+  const color = trackIndex.routeColors.get(routeId) || DEFAULT_ROUTE_COLOR;
+  // Light bullets (N/Q/R/W yellow, L gray) use dark text on real MTA signage — white
+  // would be unreadable on them.
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+  const textColor = 0.299 * r + 0.587 * g + 0.114 * b > 160 ? '#0b0f14' : '#fff';
+  return `<span class="popup-bullet" style="background:${color};color:${textColor}">${esc(routeId)}</span>`;
+}
+
+function statusHtml(status, delaySeconds) {
+  if (status === 'delayed') return `<span class="popup-status delayed">Delayed ${Math.max(1, Math.round(delaySeconds / 60))} min</span>`;
+  if (status === 'on-time') return `<span class="popup-status on-time">On time</span>`;
+  return `<span class="popup-status unknown">Status unknown</span>`;
+}
+
+function minutesLabel(timeMs) {
+  const mins = Math.max(0, Math.round((timeMs - Date.now()) / 60000));
+  return mins < 1 ? 'due' : `${mins} min`;
+}
+
+function renderTrainPopup(tripId) {
+  const v = vehicleSegments.get(tripId);
+  if (!v) return 'Trip ended';
+
+  const destination = v.destination ? ` <span class="popup-dest-arrow">→ ${esc(v.destination)}</span>` : '';
+  const nextStopName = stationNamesById.get(v.segment.toStopId) || v.segment.toStopId;
+  const nextLine =
+    v.currentStatus === VEHICLE_STATUS_STOPPED_AT
+      ? `At ${esc(nextStopName)}`
+      : `Next stop: ${esc(nextStopName)} — ${minutesLabel(v.segment.toTimeMs)}`;
+
+  return `<div class="train-popup">
+    <div class="popup-title">${bulletHtml(v.routeId)}<strong>${esc(v.routeId)} train</strong>${destination}</div>
+    <div>${statusHtml(v.status, v.delaySeconds)}</div>
+    <div class="popup-next">${nextLine}</div>
+  </div>`;
+}
+
+function renderStationPopup(stationName, arrivals) {
+  const rows = arrivals
+    .slice(0, 8)
+    .map((a) => {
+      const dest = a.destination ? esc(a.destination) : a.direction === 'N' ? 'Northbound' : 'Southbound';
+      return `<div class="popup-arrival">${bulletHtml(a.routeId)}<span class="popup-dest">${dest}</span><span class="popup-mins${a.status === 'delayed' ? ' delayed' : ''}">${minutesLabel(a.time)}</span></div>`;
+    })
+    .join('');
+  return `<div class="station-popup">
+    <div class="popup-title"><strong>${esc(stationName)}</strong></div>
+    ${rows || '<div class="popup-empty">No upcoming trains</div>'}
+  </div>`;
+}
 
 // Actual on-screen movement can be just a couple of pixels a second at typical zoom —
 // too subtle to notice at a glance. A pulsing glow on actively-moving trains (anything
@@ -51,7 +108,15 @@ function tickVehiclePositions() {
   const now = Date.now();
   for (const [tripId, { routeId, segment }] of vehicleSegments) {
     const marker = vehicleMarkers.get(tripId);
-    if (marker) marker.setLatLng(trackIndex.positionAlongSegment(routeId, segment, now));
+    if (!marker) continue;
+    const pos = trackIndex.positionAlongSegment(routeId, segment, now);
+    marker.setLatLng(pos);
+    // Leaflet doesn't move an already-open popup along with its marker — keep the (at
+    // most one) open train popup glued to the train, with its ETA counting down live.
+    if (marker.isPopupOpen()) {
+      marker.getPopup().setLatLng(pos);
+      marker.setPopupContent(renderTrainPopup(tripId));
+    }
   }
 }
 setInterval(tickVehiclePositions, 1000);
@@ -83,6 +148,8 @@ async function loadGeometry() {
   const stationLayer = L.layerGroup();
   const stationMarkers = [];
   for (const station of stations) {
+    stationNamesById.set(station.stopId, station.name);
+
     const marker = L.circleMarker([station.lat, station.lon], {
       radius: 4,
       color: '#e6edf3',
@@ -91,7 +158,24 @@ async function loadGeometry() {
       weight: 2,
     })
       .bindTooltip(station.name, { direction: 'top' })
+      .bindPopup('Loading…', { maxWidth: 300 })
       .addTo(stationLayer);
+
+    // Arrivals are fetched fresh on every open — the popup may sit open a while, but
+    // the times shown are from tap time, which matches rider expectations ("what's
+    // coming when I tapped"), and re-tapping refreshes.
+    marker.on('popupopen', async (e) => {
+      e.popup.setContent('Loading…');
+      try {
+        const res = await fetch(`/api/stops/${station.stopId}/arrivals`);
+        if (!res.ok) throw new Error(`API error ${res.status}`);
+        const { arrivals } = await res.json();
+        e.popup.setContent(renderStationPopup(station.name, arrivals));
+      } catch (err) {
+        e.popup.setContent(`Couldn't load arrivals: ${esc(err.message)}`);
+      }
+    });
+
     stationMarkers.push(marker);
   }
 
@@ -125,7 +209,14 @@ function updateVehicles(vehicles) {
   for (const v of vehicles) {
     if (!v.segment) continue;
     seenTripIds.add(v.tripId);
-    vehicleSegments.set(v.tripId, { routeId: v.routeId, segment: v.segment });
+    vehicleSegments.set(v.tripId, {
+      routeId: v.routeId,
+      segment: v.segment,
+      status: v.status,
+      delaySeconds: v.delaySeconds,
+      currentStatus: v.currentStatus,
+      destination: v.destination,
+    });
 
     const existing = vehicleMarkers.get(v.tripId);
     if (existing) {
@@ -135,11 +226,14 @@ function updateVehicles(vehicles) {
       // jump). Resyncing here bounds any such freeze to at most one poll interval.
       existing.setIcon(trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus));
       existing.setLatLng(trackIndex.positionAlongSegment(v.routeId, v.segment, now));
+      if (existing.isPopupOpen()) existing.setPopupContent(renderTrainPopup(v.tripId));
     } else {
+      const tooltip = v.destination ? `${v.routeId} train → ${v.destination}` : `${v.routeId} train`;
       const marker = L.marker(trackIndex.positionAlongSegment(v.routeId, v.segment, now), {
         icon: trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus),
       })
-        .bindTooltip(`${v.routeId} train — ${v.tripId}`, { direction: 'top' })
+        .bindTooltip(tooltip, { direction: 'top' })
+        .bindPopup(() => renderTrainPopup(v.tripId), { maxWidth: 300 })
         .addTo(map);
       vehicleMarkers.set(v.tripId, marker);
     }

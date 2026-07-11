@@ -116,3 +116,71 @@ html, body.map-body {
 .leaflet-container {
   background: #0b0f14;
 }
+
+/* Dark-theme popups (train details / station arrivals) — Leaflet's default is white. */
+.leaflet-popup-content-wrapper {
+  background: #141a22;
+  color: #e6edf3;
+  border: 1px solid #232b36;
+  border-radius: 10px;
+}
+.leaflet-popup-tip {
+  background: #141a22;
+  border: 1px solid #232b36;
+}
+.leaflet-popup-close-button {
+  color: #8b98a5 !important;
+}
+.leaflet-popup-content {
+  margin: 12px 14px;
+  font-size: 13px;
+}
+
+.popup-bullet {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: 11px;
+  margin-right: 7px;
+  flex: none;
+}
+.popup-title {
+  display: flex;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.popup-dest-arrow {
+  color: #8b98a5;
+  margin-left: 4px;
+}
+.popup-status.on-time { color: #2ecc71; }
+.popup-status.delayed { color: #e0333c; }
+.popup-status.unknown { color: #8b98a5; }
+.popup-next {
+  color: #8b98a5;
+  margin-top: 4px;
+  font-size: 12px;
+}
+.popup-arrival {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+.popup-dest {
+  flex: 1;
+  min-width: 120px;
+}
+.popup-mins {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.popup-mins.delayed { color: #e0333c; }
+.popup-empty {
+  color: #8b98a5;
+  font-style: italic;
+}

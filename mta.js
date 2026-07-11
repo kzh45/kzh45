@@ -1,7 +1,7 @@
 require('dotenv').config({ quiet: true });
 const fetch = require('node-fetch');
 const GtfsRealtimeBindings = require('gtfs-realtime-bindings');
-const { getScheduledTimeMs, getAdjacentStopId, getGeometry } = require('./gtfs-static');
+const { getScheduledTimeMs, getAdjacentStopId, getTripHeadsign, getGeometry } = require('./gtfs-static');
 
 // A prediction within this many seconds of its scheduled time counts as "on-time".
 const DELAY_THRESHOLD_SECONDS = 120;
@@ -207,6 +207,7 @@ async function computeRouteUpdates(routeId) {
       v.delaySeconds = stu?.delaySeconds ?? null;
 
       const predictedArrivalMs = stu?.arrival || stu?.departure || null;
+      v.destination = await getTripHeadsign(routeId, v.tripId, v.stopId, new Date(fetchedAt));
       v.segment = await computeVehicleSegment(
         routeId, stationById, v.stopId, v.currentStatus, v.tripId, predictedArrivalMs, v.delaySeconds, fetchedAt
       );
@@ -227,4 +228,45 @@ async function fetchLinesUpdates(routeIds) {
   };
 }
 
-module.exports = { fetchRouteUpdates, fetchLinesUpdates, ALL_ROUTE_IDS };
+// Next arrivals at one station (base stop ID without the N/S platform suffix), across
+// all routes and both directions. Reads from the same 15s-cached computed results the
+// map polls, so a tap costs no extra upstream fetch.
+const MAX_STOP_ARRIVALS = 12;
+
+async function getStopArrivals(stopBaseId) {
+  const { fetchedAt, trips } = await fetchLinesUpdates(ALL_ROUTE_IDS);
+  const now = Date.now();
+
+  const arrivals = [];
+  for (const trip of trips) {
+    for (const stu of trip.stopTimeUpdates) {
+      if (stu.stopId.slice(0, -1) !== stopBaseId) continue;
+      const time = stu.arrival || stu.departure;
+      if (!time || time < now - 30000) continue; // skip stale/past predictions
+
+      arrivals.push({
+        routeId: trip.routeId,
+        tripId: trip.tripId,
+        stopId: stu.stopId,
+        direction: stu.stopId.slice(-1),
+        time,
+        status: stu.status,
+        delaySeconds: stu.delaySeconds,
+      });
+    }
+  }
+
+  arrivals.sort((a, b) => a.time - b.time);
+  const next = arrivals.slice(0, MAX_STOP_ARRIVALS);
+
+  await Promise.all(
+    next.map(async (a) => {
+      a.destination = await getTripHeadsign(a.routeId, a.tripId, a.stopId, new Date(fetchedAt));
+      delete a.tripId; // internal matching detail, not useful to clients
+    })
+  );
+
+  return { fetchedAt, arrivals: next };
+}
+
+module.exports = { fetchRouteUpdates, fetchLinesUpdates, getStopArrivals, ALL_ROUTE_IDS };

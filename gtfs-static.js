@@ -106,10 +106,11 @@ function parseTripsForRoute(routeId) {
 
   const tripsByKey = new Map(); // "code_route..dir" -> [{ tripId, serviceId }]
   const tripsByRouteDir = new Map(); // "route..dir" -> [{ code, tripId, serviceId }], sorted by code
+  const headsignByTrip = new Map(); // tripId -> trip_headsign (destination, e.g. "Flushing-Main St")
   const tripIds = new Set();
 
   for (const line of rows) {
-    const [tripRouteId, tripId, serviceId] = line.split(',');
+    const [tripRouteId, tripId, serviceId, headsign] = line.split(',');
     if (tripRouteId !== routeId) continue;
 
     const match = tripId.match(TRIP_KEY_RE);
@@ -127,12 +128,13 @@ function parseTripsForRoute(routeId) {
     if (!tripsByRouteDir.has(routeDir)) tripsByRouteDir.set(routeDir, []);
     tripsByRouteDir.get(routeDir).push({ code, tripId, serviceId });
 
+    if (headsign) headsignByTrip.set(tripId, headsign);
     tripIds.add(tripId);
   }
 
   for (const list of tripsByRouteDir.values()) list.sort((a, b) => a.code - b.code);
 
-  return { tripsByKey, tripsByRouteDir, tripIds };
+  return { tripsByKey, tripsByRouteDir, headsignByTrip, tripIds };
 }
 
 function timeStringToSeconds(hhmmss) {
@@ -343,13 +345,13 @@ function parseRouteColor(routeId) {
 async function load(routeId) {
   await ensureStaticData();
   const serviceIdsForDate = parseCalendar();
-  const { tripsByKey, tripsByRouteDir, tripIds } = parseTripsForRoute(routeId);
+  const { tripsByKey, tripsByRouteDir, headsignByTrip, tripIds } = parseTripsForRoute(routeId);
   const { stopTimesByTrip, stopSequenceByTrip } = await parseStopTimesForTrips(tripIds);
   const stations = parseStationsForRoute(stopTimesByTrip);
   const shapeByDirection = await parseShapesForRoute(routeId);
   const color = parseRouteColor(routeId);
   return {
-    serviceIdsForDate, tripsByKey, tripsByRouteDir, stopTimesByTrip, stopSequenceByTrip, stations, shapeByDirection, color,
+    serviceIdsForDate, tripsByKey, tripsByRouteDir, headsignByTrip, stopTimesByTrip, stopSequenceByTrip, stations, shapeByDirection, color,
   };
 }
 
@@ -482,6 +484,21 @@ async function getAdjacentStopId(routeId, realtimeTripId, targetStopId, now = ne
   return idx > 0 ? sequence[idx - 1] : null;
 }
 
+// Returns the matched static trip's headsign (destination, e.g. "Flushing-Main St"),
+// or null when the trip has no schedule match.
+async function getTripHeadsign(routeId, realtimeTripId, stopId, now = new Date()) {
+  let schedule;
+  try {
+    schedule = await getLoaded(routeId);
+  } catch (err) {
+    console.error('Static GTFS schedule unavailable:', err.message);
+    return null;
+  }
+
+  const tripId = matchStaticTrip(schedule, realtimeTripId, stopId, now);
+  return (tripId && schedule.headsignByTrip.get(tripId)) || null;
+}
+
 // direction_id 1 corresponds to the "S" (Manhattan-bound) platform suffix, 0 to "N".
 const DIRECTION_ID_TO_LETTER = { 0: 'N', 1: 'S' };
 
@@ -532,6 +549,7 @@ async function getMultiRouteGeometry(routeIds) {
 module.exports = {
   getScheduledTimeMs,
   getAdjacentStopId,
+  getTripHeadsign,
   getGeometry,
   getMultiRouteGeometry,
   DIRECTION_ID_TO_LETTER,
