@@ -1,8 +1,10 @@
-# NYC Subway Live Tracker
+# Headway
 
 A live map of the entire NYC subway system — every train, moving in real time along its
 actual track, colored by line, ringed green/red for on-time/delayed — decoded straight
 from MTA's public GTFS-realtime feeds. No API key required.
+
+("Headway" is the transit term for the time between trains — which is what this shows you.)
 
 ## Surfaces
 
@@ -10,10 +12,10 @@ All served by one Node/Express backend on port 3000:
 
 | Surface | URL | What it is |
 |---|---|---|
-| Live map | `/map.html` | Interactive full-system map: pan/zoom, tap a train for destination + delay + next stop, tap a station for upcoming arrivals, service-alert chips |
+| Live map | `/` | Interactive full-system map: pan/zoom, tap a train for destination + delay + next stop, tap a station for upcoming arrivals, service-alert chips |
 | Lobby kiosk | `/kiosk.html` | Locked full-screen view for an unattended display, with rotating service alerts |
-| Arrivals board | `/` | The original 7-train list view (per-station countdown clocks) |
-| Mobile app | `mobile/` | Expo/React Native — arrivals list plus the live map in a WebView |
+| Arrivals board | `/board.html` | Per-station countdown clocks for any route, with a route picker |
+| Mobile app | `mobile/` | Expo/React Native — arrivals board plus the live map in a WebView |
 
 Trains move continuously between stations. NYCT publishes no GPS for subway trains —
 positions are interpolated along real track geometry from predicted stop times, matched
@@ -29,8 +31,8 @@ npm start          # http://localhost:3000 — first start downloads/parses MTA'
 npm test           # smoke tests for the trip-matching logic
 ```
 
-Terminal debug scripts: `npm run fetch:7train` (one-shot dump), `npm run poc:live-status`
-(polls every 30s, color-coded delays).
+Terminal debug scripts (both take a route ID, default `7`): `npm run fetch:route -- A`
+(one-shot dump), `npm run poc:live-status -- A` (polls every 30s, color-coded delays).
 
 ### Mobile
 
@@ -49,8 +51,8 @@ from Expo's dev-server URI automatically. If entering the URL manually is finick
 | `GET /api/lines` | Live vehicles for all routes: interpolated position segment, delay status, destination. `?routes=1,7,A` filters; `?include=trips` adds full per-stop predictions (~10x larger) |
 | `GET /api/lines/geometry` | Stations + per-branch track polylines + route colors (cacheable, changes ~weekly) |
 | `GET /api/stops/:stopId/arrivals` | Next arrivals at one station across all routes/directions |
+| `GET /api/routes/:routeId/stations` | A route's stations in line order (schedule-derived, branch-aware) |
 | `GET /api/alerts` | Currently-active service alerts per route |
-| `GET /api/7train`, `/api/7train/geometry` | Legacy single-route endpoints used by the list views |
 | `GET /healthz` | Liveness probe |
 
 Stop IDs are GTFS: a base ID (`723` = Grand Central on the 7) plus `N`/`S` platform

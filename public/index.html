@@ -3,32 +3,37 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>NYC Subway Live Arrivals</title>
+<title>Headway — live NYC subway map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="style.css" />
+<link rel="stylesheet" href="map.css" />
 </head>
-<body>
-<header>
-  <h1><span class="bullet" id="route-bullet">7</span> <span id="board-title">Live Arrivals</span></h1>
+<body class="map-body">
+<header class="map-header">
+  <h1>Headway</h1>
   <p id="status">
     <span id="status-spinner" class="spinner" hidden></span>
     <span id="status-text">Loading…</span>
     <button id="retry-btn" type="button" hidden>Retry now</button>
   </p>
-  <div id="route-picker"></div>
-  <a class="board-link" href="map.html">Live map</a>
+  <a class="board-link" href="board.html">Arrivals board</a>
+  <div id="alerts-bar" hidden>
+    <span class="alerts-label">Service alerts:</span>
+    <span id="alerts-chips"></span>
+  </div>
+  <div id="alerts-detail" hidden></div>
 </header>
 
-<main>
-  <section class="column">
-    <h2 id="dir-N-label">Northbound</h2>
-    <ul id="board-N" class="board"></ul>
-  </section>
-  <section class="column">
-    <h2 id="dir-S-label">Southbound</h2>
-    <ul id="board-S" class="board"></ul>
-  </section>
-</main>
+<div id="map"></div>
 
-<script src="app.js"></script>
+<div class="legend">
+  <span>Ring: <i class="dot on-time"></i> On time</span>
+  <span><i class="dot delayed"></i> Delayed</span>
+  <span><i class="dot unknown"></i> Unknown</span>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="map-core.js"></script>
+<script src="map.js"></script>
 </body>
 </html>

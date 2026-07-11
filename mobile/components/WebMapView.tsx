@@ -6,7 +6,7 @@ import { getApiBaseUrl } from '../lib/mta';
 // reimplementing it natively. Trades native look-and-feel for zero porting effort and
 // reuses the exact same branch-aware track logic as the browser/kiosk versions.
 export default function WebMapView() {
-  return <WebView source={{ uri: `${getApiBaseUrl()}/map.html` }} style={styles.webview} />;
+  return <WebView source={{ uri: `${getApiBaseUrl()}/` }} style={styles.webview} />;
 }
 
 const styles = StyleSheet.create({

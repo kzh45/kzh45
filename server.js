@@ -1,8 +1,8 @@
 const express = require('express');
 const path = require('path');
 const compression = require('compression');
-const { fetchRouteUpdates, fetchLinesUpdates, getStopArrivals, fetchServiceAlerts, ALL_ROUTE_IDS } = require('./mta');
-const { getGeometry, getMultiRouteGeometry, getRouteStations } = require('./gtfs-static');
+const { fetchLinesUpdates, getStopArrivals, fetchServiceAlerts, ALL_ROUTE_IDS } = require('./mta');
+const { getMultiRouteGeometry, getRouteStations } = require('./gtfs-static');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,24 +15,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/healthz', (req, res) => {
   res.json({ ok: true, uptimeSeconds: Math.round(process.uptime()) });
-});
-
-app.get('/api/7train', async (req, res) => {
-  try {
-    const data = await fetchRouteUpdates('7');
-    res.json(data);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.get('/api/7train/geometry', async (req, res) => {
-  try {
-    const data = await getGeometry('7');
-    res.json(data);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
 });
 
 app.get('/api/lines', async (req, res) => {

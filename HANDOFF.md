@@ -1,4 +1,4 @@
-# Handoff: NYC Subway Live Tracker
+# Handoff: Headway (NYC subway live tracker)
 
 Read this before touching the code. It covers what's built, why the non-obvious parts
 work the way they do, and what's left. Written 2026-07-10 after ~15 commits of work.
@@ -9,8 +9,10 @@ A live map of the entire NYC subway system (minus Staten Island Railway), decode
 straight from MTA's public GTFS-realtime feeds — no API key required. Three surfaces
 share one backend:
 
-1. **Web arrivals board** (`public/index.html`) — 7-train-only list view, the original MVP.
-2. **Web live map** (`public/map.html`) — full system, interactive (pan/zoom/click).
+1. **Web live map** (`public/index.html`, served at `/`) — full system, interactive
+   (pan/zoom/click). The landing page; `public/map.html` is a redirect stub for old links.
+2. **Web arrivals board** (`public/board.html`) — per-station countdowns for any route,
+   with a route picker (originally the 7-train-only MVP).
 3. **Lobby kiosk** (`public/kiosk.html`) — full system, locked full-screen view for an
    unattended display (originally scoped for a building lobby screen).
 4. **Mobile app** (`mobile/`, Expo/React Native) — 7-train arrivals list, plus a "Map"
@@ -35,8 +37,8 @@ gtfs-static.js       Downloads/parses MTA's static GTFS schedule (stops/trips/st
 server.js            Express app. Static file serving + the API routes below.
 
 public/
-  index.html/app.js/style.css   7-train list view (original, untouched since Phase 0)
-  map.html/map.js/map.css       Interactive full-system map
+  index.html/map.js/map.css     Interactive full-system map (the landing page)
+  board.html/app.js/style.css   Arrivals board with route picker
   kiosk.html/kiosk.js/kiosk.css Locked-view lobby display
   map-core.js                   SHARED geometry/interpolation engine used by both
                                  map.js and kiosk.js — track-snapping, branch matching,
@@ -48,17 +50,15 @@ public/
 
 mobile/
   App.tsx                       List/Map toggle, list view is a port of public logic
-  components/WebMapView.tsx     WebView wrapping map.html — this IS the mobile map
+  components/WebMapView.tsx     WebView wrapping the web map (/) — this IS the mobile map
   lib/mta.ts                    7-train-specific fetch/grouping logic + getApiBaseUrl()
                                  (derives the backend's LAN IP from Expo's dev server URI)
 
-fetch-7-train.js, poc-live-status.js   Terminal debug scripts, not part of the served app
+fetch-route.js, poc-live-status.js   Terminal debug scripts (take a route ID arg), not part of the served app
 ```
 
 ### API endpoints
 
-- `GET /api/7train` — legacy, 7-train only, used by `index.html` and the mobile list view
-- `GET /api/7train/geometry` — legacy, 7-train only
 - `GET /api/lines?routes=1,2,A,...` — all routes (default: `ALL_ROUTE_IDS`, everything
   except SIR). Returns `{ fetchedAt, vehicles }` by default — the trips array is ~85% of
   the payload and the map/kiosk pollers never read it; `?include=trips` adds it back.
@@ -70,10 +70,15 @@ fetch-7-train.js, poc-live-status.js   Terminal debug scripts, not part of the s
   Served with Cache-Control max-age=3600; ETag revalidation returns 304.
 - `GET /api/stops/:stopId/arrivals` — next ~12 arrivals at one station (base stop ID, no
   N/S suffix) across all routes/directions, from the same 15s-cached computed results.
+- `GET /api/routes/:routeId/stations` — a route's stations in line order, derived by
+  topologically merging every scheduled trip's stop sequence (branch-aware; the trunk
+  order comes from the longest sequences, branch stations follow their junction).
 - `GET /api/alerts` — currently-active service alerts (route IDs + header text) from
   MTA's `camsys%2Fsubway-alerts` GTFS-rt feed; planned-work notices with future active
   periods are filtered out.
 - `GET /healthz` — liveness probe.
+- The legacy 7-train-only endpoints (`/api/7train`, `/api/7train/geometry`) were removed
+  when the boards were generalized — nothing consumed them anymore.
 
 Everything is gzipped (compression middleware). Measured effect: /api/lines poll
 1.9MB → ~16KB; geometry 2.1MB → ~180KB (then 0 on ETag revalidation).
@@ -169,20 +174,16 @@ around unused. Don't resurrect it without discussing — it was a real, reasoned
   don't push it unprompted, but it remains the prerequisite for the lobby-kiosk vision,
   which can't point at localhost. The repo is deploy-ready: `engines.node` pin, `PORT`
   env, gzip, `/healthz`, startup pre-warm, stale-cache refresh.
-- **`index.html` (list view) and the mobile list view are still 7-train only.** They were
-  never generalized when the map went full-system. Whether that's worth fixing depends on
-  whether the user still cares about that surface, or has fully moved to the map. (The
-  map's tap-a-station arrivals popup now covers much of the list view's value.)
 - **Rockaway Park Shuttle (H) has a ~33% trip-match rate.** Traced to a genuine gap in
   MTA's own static schedule (a stop referenced in real-time that no static trip covers).
   Not a bug in this codebase; a known upstream data quality issue for one low-ridership
   shuttle. Every other route is 95-100%.
 - **Tests cover only the trip-matching core.** `npm test` runs 13 smoke tests over the
   trip-ID quirk logic (test/trip-matching.test.js) — nothing else is under test.
-- **Several late features never got a live visual check.** Browser automation tools were
-  disconnected near the end of the last session; train/station popups, the alert chips on
-  the map, and the kiosk alert rotation were verified at the API/syntax level only. First
-  thing worth doing when picking this up: open /map.html and /kiosk.html and click around.
+- **Some features never got a live visual check.** Browser automation tools were flaky
+  through late sessions; the kiosk alert rotation and the right-hand-running train offset
+  were verified at the API/logic level only. Worth opening / and /kiosk.html and looking
+  around when picking this up.
 
 ## Recently fixed bugs (context for why certain code looks the way it does)
 
@@ -216,7 +217,7 @@ npm install
 npm start                     # http://localhost:3000
 
 # Debug scripts
-npm run fetch:7train          # one-shot terminal dump, 7 train only
+npm run fetch:route -- A      # one-shot terminal dump for a route (default 7)
 npm run poc:live-status       # polls every 30s, color-coded on-time/delayed in terminal
 
 # Mobile (from mobile/)

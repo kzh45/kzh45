@@ -1,11 +1,11 @@
 {
-  "name": "transitapp",
+  "name": "headway",
   "version": "1.0.0",
-  "description": "",
+  "description": "Live NYC subway map — every train in real time, from MTA's public GTFS-rt feeds",
   "main": "index.js",
   "scripts": {
     "test": "node --test",
-    "fetch:7train": "node fetch-7-train.js",
+    "fetch:route": "node fetch-route.js",
     "poc:live-status": "node poc-live-status.js",
     "start": "node server.js"
   },

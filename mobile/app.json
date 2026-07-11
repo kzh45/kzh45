@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "7 Train Live Arrivals",
-    "slug": "seven-train-live-arrivals",
+    "name": "Headway",
+    "slug": "headway",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",

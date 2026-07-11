@@ -2,7 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "transitapp",
+      "name": "headway",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["start"],
       "port": 3000

@@ -1,7 +1,8 @@
-// PoC: confirms we can reliably pull live 7 train positions + real on-time/delayed
-// status (matched against MTA's static schedule) from the terminal, polling every 30s —
-// the core technical unknown behind the planned live map visualization.
+// Terminal live-status monitor for one route, polling every 30s with color-coded
+// on-time/delayed output. Usage: node poc-live-status.js [routeId]
 const { fetchRouteUpdates } = require('./mta');
+
+const routeId = process.argv[2] || '7';
 
 const STATUS_COLOR = {
   'on-time': '\x1b[32m', // green
@@ -25,10 +26,10 @@ function formatStatus(status, delaySeconds) {
 }
 
 async function poll() {
-  const { fetchedAt, trips, vehicles } = await fetchRouteUpdates('7');
+  const { fetchedAt, trips, vehicles } = await fetchRouteUpdates(routeId);
   const stopTimesByTrip = new Map(trips.map((t) => [t.tripId, t.stopTimeUpdates]));
 
-  console.log(`\n7 train — live status @ ${new Date(fetchedAt).toLocaleTimeString()}`);
+  console.log(`\n${routeId} train — live status @ ${new Date(fetchedAt).toLocaleTimeString()}`);
 
   if (!vehicles.length) {
     console.log('  (no active vehicles reported right now)');
