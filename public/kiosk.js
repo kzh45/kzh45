@@ -82,18 +82,25 @@ function updateVehicles(vehicles) {
     seenTripIds.add(v.tripId);
     vehicleSegments.set(v.tripId, { routeId: v.routeId, segment: v.segment });
 
+    // setIcon replaces the marker's DOM element (restarts the pulse animation, costs
+    // layout × ~700 markers) — only when appearance actually changed.
+    const iconKey = `${v.status}|${v.currentStatus}`;
     const existing = vehicleMarkers.get(v.tripId);
     if (existing) {
+      if (existing._iconKey !== iconKey) {
+        existing.setIcon(trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus));
+        existing._iconKey = iconKey;
+      }
       // Don't rely solely on the 1s tick to keep existing markers positioned — WebViews/
       // backgrounded tabs commonly throttle JS timers, which would otherwise freeze a
       // marker mid-segment until the timer resumes (then jump). Resyncing here bounds
       // any such freeze to at most one poll interval.
-      existing.setIcon(trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus));
       existing.setLatLng(trackIndex.positionAlongSegment(v.routeId, v.segment, now, trainOffsetMeters()));
     } else {
       const marker = L.marker(trackIndex.positionAlongSegment(v.routeId, v.segment, now, trainOffsetMeters()), {
         icon: trainIcon(v.status, trackIndex.routeColors.get(v.routeId), v.currentStatus),
       }).addTo(map);
+      marker._iconKey = iconKey;
       vehicleMarkers.set(v.tripId, marker);
     }
   }
