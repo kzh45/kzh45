@@ -95,6 +95,17 @@ const CACHE_TTL_MS = 15000;
 const feedCache = new Map(); // url -> { fetchedAt, entities }
 const feedInFlight = new Map(); // url -> Promise
 
+// Lightweight liveness stats, surfaced via /healthz so a kiosk stuck on "Reconnecting…"
+// is diagnosable without shell access to the box.
+const stats = { lastFeedSuccessMs: null, feedFetches: 0, feedErrors: 0 };
+function getStats() {
+  return {
+    ...stats,
+    lastFeedSuccessAgeSeconds:
+      stats.lastFeedSuccessMs == null ? null : Math.round((Date.now() - stats.lastFeedSuccessMs) / 1000),
+  };
+}
+
 async function fetchFeed(feedUrl) {
   const cached = feedCache.get(feedUrl);
   if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
@@ -109,17 +120,24 @@ async function fetchFeed(feedUrl) {
         const apiKey = process.env.MTA_API_KEY;
         const headers = apiKey ? { 'x-api-key': apiKey } : {};
 
-        const response = await fetch(feedUrl, { headers });
-        if (!response.ok) {
-          throw new Error(`MTA feed request failed: ${response.status} ${response.statusText}`);
+        try {
+          const response = await fetch(feedUrl, { headers });
+          if (!response.ok) {
+            throw new Error(`MTA feed request failed: ${response.status} ${response.statusText}`);
+          }
+
+          const buffer = await response.arrayBuffer();
+          const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
+
+          const result = { fetchedAt: Date.now(), entities: feed.entity };
+          feedCache.set(feedUrl, result);
+          stats.feedFetches += 1;
+          stats.lastFeedSuccessMs = result.fetchedAt;
+          return result;
+        } catch (err) {
+          stats.feedErrors += 1;
+          throw err;
         }
-
-        const buffer = await response.arrayBuffer();
-        const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
-
-        const result = { fetchedAt: Date.now(), entities: feed.entity };
-        feedCache.set(feedUrl, result);
-        return result;
       })().finally(() => {
         feedInFlight.delete(feedUrl);
       })
@@ -330,4 +348,4 @@ async function getStopArrivals(stopBaseId) {
   return { fetchedAt, arrivals: next };
 }
 
-module.exports = { fetchRouteUpdates, fetchLinesUpdates, getStopArrivals, fetchServiceAlerts, ALL_ROUTE_IDS };
+module.exports = { fetchRouteUpdates, fetchLinesUpdates, getStopArrivals, fetchServiceAlerts, getStats, ALL_ROUTE_IDS };

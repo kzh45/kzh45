@@ -536,15 +536,14 @@ async function getTripHeadsign(routeId, realtimeTripId, stopId, now = new Date()
 // direction_id 1 corresponds to the "S" (Manhattan-bound) platform suffix, 0 to "N".
 const DIRECTION_ID_TO_LETTER = { 0: 'N', 1: 'S' };
 
-// Stations a route serves, in line order (S-direction start -> end), derived by
+// Orders the base stop IDs a route serves into line order (S-direction start -> end) by
 // topologically merging every scheduled trip's stop sequence. No single trip covers a
 // branching line (the A's Lefferts and Far Rockaway branches are different trips), so
 // consecutive-stop pairs from ALL trips form a precedence graph instead; branch stations
 // come out after their junction. Kahn's algorithm with a preference for the order stops
-// first appear keeps the main trunk reading naturally.
-async function getRouteStations(routeId) {
-  const { stopSequenceByTrip, stations } = await getLoaded(routeId);
-
+// first appear keeps the main trunk reading naturally. Pure — takes N/S-suffixed stop
+// sequences, returns ordered base stop IDs.
+function orderStationsByPrecedence(stopSequences) {
   const preferredOrder = new Map(); // base stopId -> first-seen index, for stable tie-breaks
   const successors = new Map(); // base stopId -> Set(next base stopId)
   const indegree = new Map();
@@ -556,13 +555,11 @@ async function getRouteStations(routeId) {
   };
 
   // Iterate longest sequences first so the trunk defines the preferred ordering.
-  const sequences = [...stopSequenceByTrip.values()]
-    .filter((seq) => seq.length && seq[0].slice(-1) === 'S')
-    .sort((a, b) => b.length - a.length);
+  const southbound = stopSequences.filter((seq) => seq.length && seq[0].slice(-1) === 'S').sort((a, b) => b.length - a.length);
   // Some services (rare patterns) may only have N-direction data — use it reversed.
-  const usable = sequences.length
-    ? sequences
-    : [...stopSequenceByTrip.values()]
+  const usable = southbound.length
+    ? southbound
+    : stopSequences
         .filter((seq) => seq.length)
         .sort((a, b) => b.length - a.length)
         .map((seq) => [...seq].reverse());
@@ -595,6 +592,12 @@ async function getRouteStations(routeId) {
   for (const id of preferredOrder.keys()) {
     if (!ordered.includes(id)) ordered.push(id);
   }
+  return ordered;
+}
+
+async function getRouteStations(routeId) {
+  const { stopSequenceByTrip, stations } = await getLoaded(routeId);
+  const ordered = orderStationsByPrecedence([...stopSequenceByTrip.values()]);
 
   return {
     routeId,
@@ -655,9 +658,17 @@ module.exports = {
   getGeometry,
   getMultiRouteGeometry,
   getRouteStations,
+  parseRouteColor,
   DIRECTION_ID_TO_LETTER,
   // Pure internals exposed for tests only — the trip-ID quirk handling here (express-X
   // stripping, single-dot shuttles, nearest-code fallback) took real investigation to get
   // right and is the most regression-prone logic in the codebase.
-  _internal: { TRIP_KEY_RE, normalizeTripKey, matchStaticTrip, anchorScheduledMs, FALLBACK_CODE_TOLERANCE },
+  _internal: {
+    TRIP_KEY_RE,
+    normalizeTripKey,
+    matchStaticTrip,
+    anchorScheduledMs,
+    orderStationsByPrecedence,
+    FALLBACK_CODE_TOLERANCE,
+  },
 };

@@ -1,11 +1,31 @@
 const express = require('express');
 const path = require('path');
 const compression = require('compression');
-const { fetchLinesUpdates, getStopArrivals, fetchServiceAlerts, ALL_ROUTE_IDS } = require('./mta');
-const { getMultiRouteGeometry, getRouteStations } = require('./gtfs-static');
+const { fetchLinesUpdates, getStopArrivals, fetchServiceAlerts, getStats, ALL_ROUTE_IDS } = require('./mta');
+const { getMultiRouteGeometry, getRouteStations, parseRouteColor } = require('./gtfs-static');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const KNOWN_ROUTES = new Set(ALL_ROUTE_IDS);
+
+// Parses a ?routes= param, returning the requested routes or throwing a 400-tagged error
+// on any unknown id — so a typo gets a clear "unknown route" instead of a confusing 502
+// from a downstream "Unknown routeId" throw.
+function parseRoutesParam(routesParam) {
+  if (!routesParam) return ALL_ROUTE_IDS;
+  const requested = routesParam.split(',');
+  const unknown = requested.filter((r) => !KNOWN_ROUTES.has(r));
+  if (unknown.length) {
+    const err = new Error(`Unknown route(s): ${unknown.join(', ')}`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return requested;
+}
+
+function sendError(res, err) {
+  res.status(err.statusCode || 502).json({ error: err.message });
+}
 
 // The API payloads are large, repetitive JSON (2.1MB geometry, vehicle updates every
 // 15s from every open client) — gzip cuts them ~8-10x, which is the difference between
@@ -14,12 +34,29 @@ app.use(compression());
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/healthz', (req, res) => {
-  res.json({ ok: true, uptimeSeconds: Math.round(process.uptime()) });
+  const stats = getStats();
+  // Degraded once live data is stale beyond a few poll cycles — a monitor (or a glance
+  // during setup) can tell a stuck kiosk from a healthy one.
+  const stale = stats.lastFeedSuccessAgeSeconds != null && stats.lastFeedSuccessAgeSeconds > 90;
+  res.json({
+    ok: !stale,
+    uptimeSeconds: Math.round(process.uptime()),
+    lastFeedSuccessAgeSeconds: stats.lastFeedSuccessAgeSeconds,
+    feedFetches: stats.feedFetches,
+    feedErrors: stats.feedErrors,
+  });
+});
+
+// Tiny route metadata (id + color) so the arrivals board can style its picker chips
+// without fetching the ~180KB geometry payload. Colors are canonical and static.
+app.get('/api/routes', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.json(ALL_ROUTE_IDS.map((routeId) => ({ routeId, color: parseRouteColor(routeId) })));
 });
 
 app.get('/api/lines', async (req, res) => {
   try {
-    const routes = req.query.routes ? req.query.routes.split(',') : ALL_ROUTE_IDS;
+    const routes = parseRoutesParam(req.query.routes);
     const data = await fetchLinesUpdates(routes);
 
     // The trips array is ~85% of the payload and the map/kiosk pollers only read
@@ -31,19 +68,22 @@ app.get('/api/lines', async (req, res) => {
       res.json({ fetchedAt: data.fetchedAt, vehicles: data.vehicles });
     }
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
 app.get('/api/routes/:routeId/stations', async (req, res) => {
   try {
+    if (!KNOWN_ROUTES.has(req.params.routeId)) {
+      return res.status(400).json({ error: `Unknown route: ${req.params.routeId}` });
+    }
     const data = await getRouteStations(req.params.routeId);
     // Station order only changes when the static schedule does (~monthly) — same
     // caching treatment as geometry.
     res.set('Cache-Control', 'public, max-age=3600');
     res.json(data);
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -52,7 +92,7 @@ app.get('/api/alerts', async (req, res) => {
     const data = await fetchServiceAlerts();
     res.json(data);
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -61,13 +101,13 @@ app.get('/api/stops/:stopId/arrivals', async (req, res) => {
     const data = await getStopArrivals(req.params.stopId);
     res.json(data);
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
 app.get('/api/lines/geometry', async (req, res) => {
   try {
-    const routes = req.query.routes ? req.query.routes.split(',') : ALL_ROUTE_IDS;
+    const routes = parseRoutesParam(req.query.routes);
     const data = await getMultiRouteGeometry(routes);
 
     // Track geometry only changes when MTA republishes the static schedule (roughly
@@ -77,7 +117,7 @@ app.get('/api/lines/geometry', async (req, res) => {
     res.set('Cache-Control', 'public, max-age=3600');
     res.json(data);
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    sendError(res, err);
   }
 });
 

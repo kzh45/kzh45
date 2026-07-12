@@ -98,10 +98,12 @@ function renderBoard(listEl, groups, direction) {
 
 function renderPicker() {
   const picker = document.getElementById('route-picker');
+  picker.setAttribute('role', 'group');
+  picker.setAttribute('aria-label', 'Choose a route');
   picker.innerHTML = PICKER_ROUTES.map((r) => {
     const color = routeColors.get(r) || '#8b98a5';
     const selected = r === currentRoute ? ' selected' : '';
-    return `<button class="route-chip${selected}" data-route="${esc(r)}" style="background:${color};color:${textColorFor(color)}">${esc(r)}</button>`;
+    return `<button class="route-chip${selected}" data-route="${esc(r)}" aria-label="${esc(r)} train" aria-pressed="${r === currentRoute}" style="background:${color};color:${textColorFor(color)}">${esc(r)}</button>`;
   }).join('');
   for (const btn of picker.querySelectorAll('.route-chip')) {
     btn.addEventListener('click', () => selectRoute(btn.dataset.route));
@@ -195,9 +197,11 @@ document.getElementById('retry-btn').addEventListener('click', refresh);
 
 (async () => {
   try {
-    const res = await fetch('/api/lines/geometry');
+    // ~1KB of {routeId,color} — the board only needs chip colors, not the ~180KB of
+    // station/track geometry the map loads.
+    const res = await fetch('/api/routes');
     if (res.ok) {
-      const { routes } = await res.json();
+      const routes = await res.json();
       for (const r of routes) if (r.color) routeColors.set(r.routeId, r.color);
     }
   } catch {
