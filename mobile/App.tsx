@@ -128,10 +128,13 @@ export default function App() {
         </Pressable>
       </View>
 
-      {viewMode === 'map' ? (
+      {/* Both panes stay mounted; we toggle visibility so switching to Map doesn't
+          fully reload the WebView (and the list keeps its polling state warm). */}
+      <View style={[styles.pane, viewMode !== 'map' && styles.paneHidden]}>
         <WebMapView />
-      ) : (
-        <>
+      </View>
+
+      <View style={[styles.pane, viewMode !== 'list' && styles.paneHidden]}>
       <View style={styles.header}>
         <View style={styles.titleRow}>
           <View style={[styles.bullet, { backgroundColor: routeColor }]}>
@@ -206,14 +209,15 @@ export default function App() {
           );
         }}
       />
-        </>
-      )}
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#0b0f14' },
+  pane: { flex: 1 },
+  paneHidden: { display: 'none' },
   modeRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, paddingTop: 12 },
   modeBtn: {
     paddingVertical: 6,
