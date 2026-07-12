@@ -198,3 +198,15 @@ function createTrackIndex() {
 
   return { trackByRoute, stationIndexByRoute, routeColors, addRoute, getSubPath, positionAlongSegment };
 }
+
+// Loaded via <script> in the browser (globals) AND require()'d by tests in node. The
+// guard keeps the browser path untouched while exposing the pure geometry math.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    createTrackIndex,
+    distanceMeters,
+    bearingBetween,
+    offsetRightOfTravel,
+    pointAndBearingAtDistance,
+  };
+}
