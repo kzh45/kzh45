@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Headway — live NYC subway map</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
 <link rel="stylesheet" href="style.css" />
 <link rel="stylesheet" href="map.css" />
@@ -14,7 +15,7 @@
   <p id="status">
     <span id="status-spinner" class="spinner" hidden></span>
     <span id="status-text">Loading…</span>
-    <button id="retry-btn" type="button" hidden>Retry now</button>
+    <button id="retry-btn" type="button" aria-label="Retry loading live data" hidden>Retry now</button>
   </p>
   <a class="board-link" href="board.html">Arrivals board</a>
   <div id="alerts-bar" hidden>
@@ -24,12 +25,12 @@
   <div id="alerts-detail" hidden></div>
 </header>
 
-<div id="map"></div>
+<div id="map" role="application" aria-label="Live map of NYC subway trains"></div>
 
-<div class="legend">
-  <span>Ring: <i class="dot on-time"></i> On time</span>
-  <span><i class="dot delayed"></i> Delayed</span>
-  <span><i class="dot unknown"></i> Unknown</span>
+<div class="legend" aria-label="Train status legend">
+  <span>Ring: <i class="dot on-time" aria-hidden="true"></i> On time</span>
+  <span><i class="dot delayed" aria-hidden="true"></i> Delayed</span>
+  <span><i class="dot unknown" aria-hidden="true"></i> Unknown</span>
 </div>
 
 <script src="vendor/leaflet/leaflet.js"></script>

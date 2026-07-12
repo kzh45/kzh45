@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Headway — arrivals board</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -12,7 +13,7 @@
   <p id="status">
     <span id="status-spinner" class="spinner" hidden></span>
     <span id="status-text">Loading…</span>
-    <button id="retry-btn" type="button" hidden>Retry now</button>
+    <button id="retry-btn" type="button" aria-label="Retry loading live data" hidden>Retry now</button>
   </p>
   <div id="route-picker"></div>
   <a class="board-link" href="/">Live map</a>
