@@ -6,6 +6,11 @@ const { getScheduledTimeMs, getAdjacentStopId, getTripHeadsign, getGeometry } = 
 // A prediction within this many seconds of its scheduled time counts as "on-time".
 const DELAY_THRESHOLD_SECONDS = 120;
 
+// Beyond this, the "delay" is almost certainly a service-day mismatch in trip matching
+// (a ±24h artifact), not a real delay — report "unknown" rather than a lie. Genuine
+// delays this large mean suspended service, where unknown is the honest answer too.
+const SANITY_DELAY_SECONDS = 3 * 3600;
+
 const VEHICLE_STATUS = { INCOMING_AT: 0, STOPPED_AT: 1, IN_TRANSIT_TO: 2 };
 
 // Used when the previous station has no static-schedule match (rare — e.g. an
@@ -32,7 +37,7 @@ async function computeVehicleSegment(routeId, stations, targetStopId, currentSta
 
   if (currentStatus === VEHICLE_STATUS.STOPPED_AT || !predictedArrivalMs) return atStation();
 
-  const prevStopId = await getAdjacentStopId(routeId, tripId, targetStopId, new Date(now));
+  const prevStopId = await getAdjacentStopId(routeId, tripId, targetStopId, predictedArrivalMs);
   const prevBaseStopId = prevStopId?.slice(0, -1);
   const prev = prevBaseStopId ? stations.get(prevBaseStopId) : null;
   if (!prev) return atStation();
@@ -40,7 +45,7 @@ async function computeVehicleSegment(routeId, stations, targetStopId, currentSta
   // Reuse the trip's already-known delay to avoid a second async schedule lookup:
   // scheduled(target) = predicted(target) - delay.
   const scheduledTargetMs = delaySeconds != null ? predictedArrivalMs - delaySeconds * 1000 : predictedArrivalMs;
-  const scheduledPrevMs = await getScheduledTimeMs(routeId, tripId, prevStopId, new Date(now));
+  const scheduledPrevMs = await getScheduledTimeMs(routeId, tripId, prevStopId, predictedArrivalMs);
 
   const segmentDurationMs =
     scheduledPrevMs != null && scheduledTargetMs - scheduledPrevMs > 0
@@ -173,10 +178,13 @@ async function computeRouteUpdates(routeId) {
           const departure = stu.departure ? stu.departure.time * 1000 : null;
           const predicted = arrival || departure;
 
+          // The predicted time is the reference that disambiguates which service DAY the
+          // trip belongs to (late-night yesterday spillover vs pre-assigned tomorrow trips).
           const scheduled = predicted
-            ? await getScheduledTimeMs(routeId, trip.tripId, stu.stopId)
+            ? await getScheduledTimeMs(routeId, trip.tripId, stu.stopId, predicted)
             : null;
-          const delaySeconds = scheduled != null ? Math.round((predicted - scheduled) / 1000) : null;
+          let delaySeconds = scheduled != null ? Math.round((predicted - scheduled) / 1000) : null;
+          if (delaySeconds != null && Math.abs(delaySeconds) > SANITY_DELAY_SECONDS) delaySeconds = null;
           const status =
             delaySeconds == null ? 'unknown' : delaySeconds > DELAY_THRESHOLD_SECONDS ? 'delayed' : 'on-time';
 
@@ -207,7 +215,7 @@ async function computeRouteUpdates(routeId) {
       v.delaySeconds = stu?.delaySeconds ?? null;
 
       const predictedArrivalMs = stu?.arrival || stu?.departure || null;
-      v.destination = await getTripHeadsign(routeId, v.tripId, v.stopId, new Date(fetchedAt));
+      v.destination = await getTripHeadsign(routeId, v.tripId, v.stopId, predictedArrivalMs || fetchedAt);
       v.segment = await computeVehicleSegment(
         routeId, stationById, v.stopId, v.currentStatus, v.tripId, predictedArrivalMs, v.delaySeconds, fetchedAt
       );
@@ -314,7 +322,7 @@ async function getStopArrivals(stopBaseId) {
 
   await Promise.all(
     next.map(async (a) => {
-      a.destination = await getTripHeadsign(a.routeId, a.tripId, a.stopId, new Date(fetchedAt));
+      a.destination = await getTripHeadsign(a.routeId, a.tripId, a.stopId, a.time);
       delete a.tripId; // internal matching detail, not useful to clients
     })
   );

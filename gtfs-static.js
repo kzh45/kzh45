@@ -396,54 +396,94 @@ async function getLoaded(routeId) {
 // still considered a match, picking the closest one.
 const FALLBACK_CODE_TOLERANCE = 800;
 
-// Finds the static trip that's both active today-or-yesterday and actually serves the given
-// stop: first by exact origin-time/route/direction code, falling back to the nearest code
-// within tolerance in the same route+direction if no exact match qualifies. Returns the
-// matched static tripId, or null.
-function matchStaticTrip(schedule, realtimeTripId, stopId, now) {
+// Anchors a GTFS stop time (seconds past a service day's midnight, may exceed 24:00:00)
+// to a concrete epoch, considering every service day the trip's service actually runs on
+// among the reference time's yesterday/today/tomorrow, and picking the one landing
+// nearest the REFERENCE time (the real-time predicted time when available, else now).
+// Getting the day wrong is a ±24h delay error, and both directions occurred in the wild:
+// - Late-night trips (times like 25:10 under YESTERDAY's service) anchored to today read
+//   24h early, so delayed overnight trains always showed "on-time".
+// - Trips pre-assigned in the feed for TOMORROW's service (visible from mid-afternoon
+//   onward) anchored to today showed as phantom "+24h delayed" red trains every evening.
+//   Only the predicted time disambiguates these: to wall-clock "now", tonight's 8:55pm
+//   anchor always looks closer than tomorrow's.
+function anchorScheduledMs(serviceIdsForDate, serviceId, scheduledSeconds, referenceMs) {
+  const refMs = referenceMs instanceof Date ? referenceMs.getTime() : referenceMs;
+  const refDayStart = new Date(refMs);
+  refDayStart.setHours(0, 0, 0, 0);
+
+  let best = null;
+  for (const dayOffset of [-1, 0, 1]) {
+    const dayStart = new Date(refDayStart);
+    dayStart.setDate(dayStart.getDate() + dayOffset);
+    if (!serviceIdsForDate(dayStart).includes(serviceId)) continue;
+    const anchored = dayStart.getTime() + scheduledSeconds * 1000;
+    if (best === null || Math.abs(anchored - refMs) < Math.abs(best - refMs)) best = anchored;
+  }
+  return best;
+}
+
+// Finds the static trip match for a real-time trip at a given stop, across services
+// active on the reference day or its neighbors (feeds pre-assign next-service-day trips
+// from mid-afternoon, and late-night trips belong to the previous service day). Exact
+// origin-time-code matches are preferred; otherwise the nearest code within tolerance.
+// Within a tier, the candidate whose anchored schedule time lands nearest the reference
+// time wins. Returns { tripId, scheduledMs } for the given stop, or null.
+function matchStaticTrip(schedule, realtimeTripId, stopId, referenceMs) {
   const { serviceIdsForDate, tripsByKey, tripsByRouteDir, stopTimesByTrip } = schedule;
 
   const match = realtimeTripId.match(TRIP_KEY_RE);
   if (!match) return null;
   const key = normalizeTripKey(match[1]);
+  const refMs = referenceMs instanceof Date ? referenceMs.getTime() : referenceMs;
 
-  const today = new Date(now);
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const activeServiceIds = new Set([...serviceIdsForDate(today), ...serviceIdsForDate(yesterday)]);
-
-  const isValidCandidate = (candidate) => {
-    if (!activeServiceIds.has(candidate.serviceId)) return false;
+  const evaluate = (candidate) => {
     const stopTimes = stopTimesByTrip.get(candidate.tripId);
-    return Boolean(stopTimes && stopTimes.has(stopId));
+    if (!stopTimes || !stopTimes.has(stopId)) return null;
+    const scheduledMs = anchorScheduledMs(serviceIdsForDate, candidate.serviceId, stopTimes.get(stopId), refMs);
+    return scheduledMs === null ? null : { tripId: candidate.tripId, scheduledMs };
   };
 
-  for (const candidate of tripsByKey.get(key) || []) {
-    if (isValidCandidate(candidate)) return candidate.tripId;
-  }
+  const pickNearestReference = (candidates) => {
+    let best = null;
+    for (const candidate of candidates) {
+      const result = evaluate(candidate);
+      if (result && (!best || Math.abs(result.scheduledMs - refMs) < Math.abs(best.scheduledMs - refMs))) {
+        best = result;
+      }
+    }
+    return best;
+  };
+
+  // Trust an exact-code match only when its anchored time is plausibly near the
+  // reference. An exact code can exist ONLY under the wrong day's service (e.g. today's
+  // 8:48am code is Saturday-only while tomorrow's Sunday equivalent is 8:49) — blindly
+  // short-circuiting on it produced ±24h matches while a near-code candidate sat minutes
+  // away in the fallback tier. Real delays beyond this window are effectively suspended
+  // service, where "unknown" is more honest than a day-crossed guess anyway.
+  const EXACT_TRUST_MS = 2 * 3600 * 1000;
+  const exact = pickNearestReference(tripsByKey.get(key) || []);
+  if (exact && Math.abs(exact.scheduledMs - refMs) <= EXACT_TRUST_MS) return exact;
 
   const codeMatch = key.match(/^(\d{6})_(.+)$/);
-  if (!codeMatch) return null;
+  if (!codeMatch) return exact;
   const targetCode = Number(codeMatch[1]);
   const routeDir = codeMatch[2];
 
-  let best = null;
-  let bestDiff = Infinity;
-  for (const candidate of tripsByRouteDir.get(routeDir) || []) {
-    const diff = Math.abs(candidate.code - targetCode);
-    if (diff > FALLBACK_CODE_TOLERANCE || diff >= bestDiff) continue;
-    if (!isValidCandidate(candidate)) continue;
-    best = candidate;
-    bestDiff = diff;
-  }
-
-  return best ? best.tripId : null;
+  // Superset of the exact-key trips (code diff 0), so the exact match still wins here
+  // whenever it genuinely is the nearest.
+  const withinTolerance = (tripsByRouteDir.get(routeDir) || []).filter(
+    (c) => Math.abs(c.code - targetCode) <= FALLBACK_CODE_TOLERANCE
+  );
+  return pickNearestReference(withinTolerance) || exact;
 }
 
 // Returns the scheduled epoch-ms for a real-time trip at a given stop, or null if no
 // matching scheduled trip/stop is found (e.g. an unscheduled/extra train, or a brand-new
-// static schedule not yet reflecting a recent service change).
-async function getScheduledTimeMs(routeId, realtimeTripId, stopId, now = new Date()) {
+// static schedule not yet reflecting a recent service change). Pass the trip's PREDICTED
+// time at this stop as `reference` when available — it's what disambiguates which service
+// day a trip belongs to (see anchorScheduledMs).
+async function getScheduledTimeMs(routeId, realtimeTripId, stopId, reference = new Date()) {
   let schedule;
   try {
     schedule = await getLoaded(routeId);
@@ -452,14 +492,8 @@ async function getScheduledTimeMs(routeId, realtimeTripId, stopId, now = new Dat
     return null;
   }
 
-  const tripId = matchStaticTrip(schedule, realtimeTripId, stopId, now);
-  if (!tripId) return null;
-
-  const scheduledSeconds = schedule.stopTimesByTrip.get(tripId).get(stopId);
-  const serviceDayStart = new Date(now);
-  serviceDayStart.setHours(0, 0, 0, 0);
-  // GTFS times can exceed 24:00:00 for trips continuing past midnight on the same service day.
-  return serviceDayStart.getTime() + scheduledSeconds * 1000;
+  const match = matchStaticTrip(schedule, realtimeTripId, stopId, reference);
+  return match ? match.scheduledMs : null;
 }
 
 // Returns the stop_id immediately before targetStopId in the real, scheduled stop sequence
@@ -474,10 +508,10 @@ async function getAdjacentStopId(routeId, realtimeTripId, targetStopId, now = ne
     return null;
   }
 
-  const tripId = matchStaticTrip(schedule, realtimeTripId, targetStopId, now);
-  if (!tripId) return null;
+  const match = matchStaticTrip(schedule, realtimeTripId, targetStopId, now);
+  if (!match) return null;
 
-  const sequence = schedule.stopSequenceByTrip.get(tripId);
+  const sequence = schedule.stopSequenceByTrip.get(match.tripId);
   if (!sequence) return null;
 
   const idx = sequence.indexOf(targetStopId);
@@ -495,8 +529,8 @@ async function getTripHeadsign(routeId, realtimeTripId, stopId, now = new Date()
     return null;
   }
 
-  const tripId = matchStaticTrip(schedule, realtimeTripId, stopId, now);
-  return (tripId && schedule.headsignByTrip.get(tripId)) || null;
+  const match = matchStaticTrip(schedule, realtimeTripId, stopId, now);
+  return (match && schedule.headsignByTrip.get(match.tripId)) || null;
 }
 
 // direction_id 1 corresponds to the "S" (Manhattan-bound) platform suffix, 0 to "N".
@@ -625,5 +659,5 @@ module.exports = {
   // Pure internals exposed for tests only — the trip-ID quirk handling here (express-X
   // stripping, single-dot shuttles, nearest-code fallback) took real investigation to get
   // right and is the most regression-prone logic in the codebase.
-  _internal: { TRIP_KEY_RE, normalizeTripKey, matchStaticTrip, FALLBACK_CODE_TOLERANCE },
+  _internal: { TRIP_KEY_RE, normalizeTripKey, matchStaticTrip, anchorScheduledMs, FALLBACK_CODE_TOLERANCE },
 };
