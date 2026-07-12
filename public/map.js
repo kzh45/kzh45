@@ -384,7 +384,10 @@ function renderAlerts() {
 
   bar.hidden = false;
   chips.innerHTML = routes
-    .map((r) => `<button class="alert-chip${r === selectedAlertRoute ? ' selected' : ''}" data-route="${esc(r)}">${bulletHtml(r)}</button>`)
+    .map(
+      (r) =>
+        `<button class="alert-chip${r === selectedAlertRoute ? ' selected' : ''}" data-route="${esc(r)}" aria-label="Service alert for ${esc(r)} train" aria-pressed="${r === selectedAlertRoute}">${bulletHtml(r)}</button>`
+    )
     .join('');
   for (const btn of chips.querySelectorAll('.alert-chip')) {
     btn.addEventListener('click', () => {
