@@ -122,10 +122,12 @@ app.get('/api/lines/geometry', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
+  console.log(`Headway server listening on port ${PORT}`);
 
   // Parsing all routes' static schedules takes ~7s the first time (cold in-memory cache) —
   // pay that cost once at startup instead of making the first real visitor wait for it.
+  // On an ephemeral-filesystem host this also downloads MTA's static GTFS zip on each cold
+  // boot; failure here is non-fatal (lazy retry on first request).
   getMultiRouteGeometry(ALL_ROUTE_IDS).catch((err) => {
     console.error('Static schedule pre-warm failed (will retry lazily on first request):', err.message);
   });

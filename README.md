@@ -80,3 +80,21 @@ public/map-core.js  Shared client geometry engine (track snapping, branch matchi
 
 For the non-obvious design decisions (trip-ID matching quirks, branch geometry
 deduplication, caching layers, what was tried and abandoned), read **HANDOFF.md** first.
+
+## Deploy
+
+The backend is a plain Node/Express app with no build step — any host that runs
+`npm install && npm start` works. It's deploy-ready as-is:
+
+- Binds `process.env.PORT` (falls back to 3000 locally).
+- No external database — MTA's static GTFS zip is downloaded to `data/` on first boot
+  (~5.6MB, ~7s pre-warm, logged; gitignored, re-downloaded on each cold start on an
+  ephemeral filesystem, refreshed weekly otherwise).
+- `GET /healthz` for platform health checks — returns `ok:false` and last-fetch age when
+  live data goes stale.
+- Everything gzipped; geometry cached an hour via ETag.
+
+On a from-GitHub host (Railway, Render, Fly): point it at this repo, no env vars required.
+For an always-on lobby kiosk, pick a plan that doesn't sleep on idle (free tiers that
+sleep add a cold-start delay when the screen wakes). The mobile app stays a dev tool
+(Expo Go on the LAN); the web map/board/kiosk are the deployable surfaces.
