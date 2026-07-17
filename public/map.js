@@ -26,6 +26,20 @@ const vehicleSegments = new Map(); // tripId -> { routeId, segment, status, dela
 const stationNamesById = new Map(); // base stopId -> station name
 const routePolylines = new Map(); // routeId -> [L.polyline per branch]
 const trackIndex = createTrackIndex();
+// trunk (routeId minus express X suffix) -> when a live train was last seen. Routes
+// whose trunk has no recent trains draw dimmed — overnight the map then reads like
+// MTA's late-night map (no B, no W, ...) purely from live data, and daytime
+// suspensions dim the same way. The grace window stops flicker: shuttle trips (GS/FS)
+// are short enough that a poll can briefly catch none mid-turnaround, and a line
+// blinking dim/lit every 15s would read as a glitch. A real absence blows well past it.
+const lastSeenByTrunk = new Map();
+const SERVICE_GRACE_MS = 90000;
+
+function trunkInService(routeId) {
+  if (lastSeenByTrunk.size === 0) return true; // no data yet — don't dim the whole city
+  const seen = lastSeenByTrunk.get(routeId.replace(/X$/, ''));
+  return seen !== undefined && Date.now() - seen < SERVICE_GRACE_MS;
+}
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -210,22 +224,40 @@ async function loadGeometry() {
     routePolylines.set(route.routeId, lines);
   }
 
+  // Stations sharing a complexId are one physical complex published as several GTFS
+  // parent stations (Times Sq-42 St is four of them) — draw ONE dot per complex at the
+  // members' centroid instead of a stack of overlapping dots and labels. Tapping it
+  // fetches arrivals for every member so no platform's trains go missing.
+  const complexes = new Map(); // complexId -> { names: [], stopIds: [], latSum, lonSum }
+  for (const station of stations) {
+    const key = station.complexId || station.stopId;
+    let c = complexes.get(key);
+    if (!c) complexes.set(key, (c = { names: [], stopIds: [], latSum: 0, lonSum: 0 }));
+    if (!c.names.includes(station.name)) c.names.push(station.name);
+    c.stopIds.push(station.stopId);
+    c.latSum += station.lat;
+    c.lonSum += station.lon;
+  }
+
   const stationLayer = L.layerGroup();
   const stationMarkers = [];
-  for (const station of stations) {
-    stationNamesById.set(station.stopId, station.name);
+  for (const c of complexes.values()) {
+    // Most complexes share one name; differently-named members (South Ferry + Whitehall
+    // St) read naturally joined.
+    const displayName = c.names.join(' / ');
+    for (const stopId of c.stopIds) stationNamesById.set(stopId, displayName);
 
-    const marker = L.circleMarker([station.lat, station.lon], {
+    const marker = L.circleMarker([c.latSum / c.stopIds.length, c.lonSum / c.stopIds.length], {
       radius: 4,
       color: '#e6edf3',
       fillColor: '#0b0f14',
       fillOpacity: 1,
       weight: 2,
     })
-      .bindTooltip(station.name, { direction: 'top' })
+      .bindTooltip(displayName, { direction: 'top' })
       .bindPopup('Loading…', { maxWidth: 300 })
       .addTo(stationLayer);
-    marker.stationName = station.name; // read back when rebinding tooltips at the label-zoom threshold
+    marker.stationName = displayName; // read back when rebinding tooltips at the label-zoom threshold
 
     // Arrivals are fetched fresh on every open — the popup may sit open a while, but
     // the times shown are from tap time, which matches rider expectations ("what's
@@ -233,10 +265,15 @@ async function loadGeometry() {
     marker.on('popupopen', async (e) => {
       e.popup.setContent('Loading…');
       try {
-        const res = await fetch(`/api/stops/${station.stopId}/arrivals`);
-        if (!res.ok) throw new Error(`API error ${res.status}`);
-        const { arrivals } = await res.json();
-        e.popup.setContent(renderStationPopup(station.name, arrivals));
+        const perStop = await Promise.all(
+          c.stopIds.map(async (stopId) => {
+            const res = await fetch(`/api/stops/${stopId}/arrivals`);
+            if (!res.ok) throw new Error(`API error ${res.status}`);
+            return (await res.json()).arrivals;
+          })
+        );
+        const arrivals = perStop.flat().sort((a, b) => a.time - b.time);
+        e.popup.setContent(renderStationPopup(displayName, arrivals));
       } catch (err) {
         e.popup.setContent(`Couldn't load arrivals: ${esc(err.message)}`);
       }
@@ -285,6 +322,56 @@ async function loadGeometry() {
   }
   map.on('zoomend', updateStationDisplay);
   updateStationDisplay();
+
+  addAirportLinks(stations);
+  // Geometry can finish after the first vehicle poll — restyle now that lines exist.
+  applyAlertHighlight();
+  updateDimNote();
+}
+
+// Airport access — the thing every tourist scans a subway map for. Neither link is in
+// the subway feeds (AirTrain is Port Authority, the Q70 is a bus), so these are static:
+// a badge at each airport plus dashed connectors from the stations riders transfer at.
+// Stations are looked up by name so a GTFS stop-ID reshuffle can't silently break this.
+const AIRPORTS = [
+  {
+    code: 'JFK',
+    name: 'JFK Airport',
+    lat: 40.6446,
+    lon: -73.7797,
+    via: 'AirTrain JFK',
+    stationNames: ['Howard Beach-JFK Airport', 'Sutphin Blvd-Archer Av-JFK Airport'],
+  },
+  {
+    code: 'LGA',
+    name: 'LaGuardia Airport',
+    lat: 40.7769,
+    lon: -73.874,
+    via: 'Q70 SBS bus (free)',
+    stationNames: ['Jackson Hts-Roosevelt Av', '61 St-Woodside'],
+  },
+];
+
+function addAirportLinks(stations) {
+  const byName = new Map(stations.map((s) => [s.name, s]));
+  for (const airport of AIRPORTS) {
+    const linked = airport.stationNames.map((n) => byName.get(n)).filter(Boolean);
+    for (const station of linked) {
+      L.polyline(
+        [
+          [station.lat, station.lon],
+          [airport.lat, airport.lon],
+        ],
+        { color: '#8b98a5', weight: 2, dashArray: '4 6', opacity: 0.45, interactive: false }
+      ).addTo(map);
+    }
+    L.marker([airport.lat, airport.lon], {
+      icon: L.divIcon({ className: '', html: `<div class="airport-badge">✈ ${airport.code}</div>`, iconSize: null }),
+      keyboard: false,
+    })
+      .bindTooltip(`${airport.name} — ${airport.via} from ${airport.stationNames.join(' or ')}`, { direction: 'top' })
+      .addTo(map);
+  }
 }
 
 function updateVehicles(vehicles) {
@@ -340,6 +427,10 @@ function updateVehicles(vehicles) {
       vehicleSegments.delete(tripId);
     }
   }
+
+  for (const v of vehicles) lastSeenByTrunk.set(v.routeId.replace(/X$/, ''), now);
+  applyAlertHighlight();
+  updateDimNote();
 }
 
 let consecutiveErrors = 0;
@@ -395,14 +486,31 @@ function sameTrunk(a, b) {
   return a.replace(/X$/, '') === b.replace(/X$/, '');
 }
 
+// Single owner of route-line styling: an explicit alert selection wins, otherwise lines
+// dim when their trunk has no live trains. Dimmed lines also drop behind lit ones so an
+// idle route sharing a trunk (the W at 2am on the N/Q/R) doesn't wash out live track.
 function applyAlertHighlight() {
   for (const [routeId, lines] of routePolylines) {
     let style;
-    if (!selectedAlertRoute) style = { weight: 3, opacity: 0.6 };
-    else if (sameTrunk(routeId, selectedAlertRoute)) style = { weight: 6, opacity: 1 };
-    else style = { weight: 3, opacity: 0.12 };
-    for (const line of lines) line.setStyle(style);
+    if (selectedAlertRoute) {
+      style = sameTrunk(routeId, selectedAlertRoute) ? { weight: 6, opacity: 1 } : { weight: 3, opacity: 0.12 };
+    } else {
+      style = { weight: 3, opacity: trunkInService(routeId) ? 0.6 : 0.12 };
+    }
+    for (const line of lines) {
+      line.setStyle(style);
+      if (style.opacity <= 0.12) line.bringToBack();
+    }
   }
+}
+
+// Note under the header while any line is dimmed for lack of service, so a faded line
+// reads as "not running right now", not as a rendering bug.
+function updateDimNote() {
+  const note = document.getElementById('dim-note');
+  if (!note) return;
+  const anyDimmed = [...routePolylines.keys()].some((routeId) => !trunkInService(routeId));
+  note.hidden = !anyDimmed;
 }
 
 function renderAlerts() {

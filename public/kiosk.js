@@ -21,6 +21,9 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 
 const vehicleMarkers = new Map(); // tripId -> L.marker
 const vehicleSegments = new Map(); // tripId -> { routeId, segment }
+const routePolylines = new Map(); // routeId -> [L.polyline per branch]
+const lastSeenByTrunk = new Map(); // trunk (routeId minus X suffix) -> last-seen ms
+const SERVICE_GRACE_MS = 90000;
 const trackIndex = createTrackIndex();
 
 function trainIcon(status, routeColor, currentStatus) {
@@ -89,10 +92,12 @@ async function loadGeometry() {
   for (const route of routes) {
     trackIndex.addRoute(route, stations);
 
+    const lines = [];
     const shapes = [...(route.track.N || []), ...(route.track.S || [])];
     for (const shape of shapes) {
-      L.polyline(shape, { color: route.color || DEFAULT_ROUTE_COLOR, weight: 4, opacity: 0.75 }).addTo(map);
+      lines.push(L.polyline(shape, { color: route.color || DEFAULT_ROUTE_COLOR, weight: 4, opacity: 0.75 }).addTo(map));
     }
+    routePolylines.set(route.routeId, lines);
   }
 
   // Fit to whatever the system's actual geographic extent is rather than a guessed
@@ -138,6 +143,23 @@ function updateVehicles(vehicles) {
       map.removeLayer(marker);
       vehicleMarkers.delete(tripId);
       vehicleSegments.delete(tripId);
+    }
+  }
+
+  // Dim lines whose trunk has no recent trains (same as the interactive map, see map.js)
+  // — overnight the kiosk then reads like the late-night map, and daytime suspensions
+  // show up too. The 90s grace stops shuttles (GS/FS) flickering when a poll briefly
+  // catches zero of their short trips; dimmed lines drop behind lit ones so an idle
+  // route sharing a trunk doesn't wash out live track.
+  for (const v of vehicles) lastSeenByTrunk.set(v.routeId.replace(/X$/, ''), now);
+  if (lastSeenByTrunk.size > 0) {
+    for (const [routeId, lines] of routePolylines) {
+      const seen = lastSeenByTrunk.get(routeId.replace(/X$/, ''));
+      const inService = seen !== undefined && now - seen < SERVICE_GRACE_MS;
+      for (const line of lines) {
+        line.setStyle({ opacity: inService ? 0.75 : 0.15 });
+        if (!inService) line.bringToBack();
+      }
     }
   }
 }

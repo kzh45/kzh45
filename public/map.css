@@ -38,6 +38,25 @@ html, body.map-body {
   font-size: 12px;
 }
 
+#dim-note {
+  margin: 6px 0 0;
+  color: #8b98a5;
+  font-size: 12px;
+}
+
+.airport-badge {
+  display: inline-block;
+  background: rgba(20, 26, 34, 0.95);
+  border: 1px solid #8b98a5;
+  border-radius: 10px;
+  padding: 2px 7px;
+  color: #e6edf3;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  transform: translate(-50%, -50%); /* center the badge on the marker point */
+}
+
 .alert-chip {
   background: none;
   border: none;

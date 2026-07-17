@@ -623,6 +623,47 @@ async function getGeometry(routeId) {
   };
 }
 
+// One physical station complex often appears as several GTFS parent stations — Times
+// Sq-42 St is FOUR (127/725/902/R16, one per operating division), Grand Central three,
+// Fulton St four. Drawn naively that's several dots and labels stacked on one corner.
+// transfers.txt says which parents are connected; union the ones that are also visually
+// the same place: same name within 250m, or any name within 150m. The distance guard
+// keeps officially-linked-but-distinct stations apart (Port Authority vs Times Sq at
+// 330m+, the 6th-Av vs 7th-Av 14 Sts at 339m) while collapsing true complexes.
+function assignComplexIds(stationsById) {
+  const parent = new Map([...stationsById.keys()].map((id) => [id, id]));
+  const find = (x) => {
+    while (parent.get(x) !== x) {
+      parent.set(x, parent.get(parent.get(x)));
+      x = parent.get(x);
+    }
+    return x;
+  };
+
+  let rows;
+  try {
+    rows = fs.readFileSync(path.join(DATA_DIR, 'transfers.txt'), 'utf8').trim().split('\n').slice(1);
+  } catch {
+    return parent; // no transfers data — every station is its own complex
+  }
+
+  for (const line of rows) {
+    const [from, to] = line.split(',');
+    if (from === to) continue;
+    const a = stationsById.get(from);
+    const b = stationsById.get(to);
+    if (!a || !b) continue;
+    const dLat = (a.lat - b.lat) * 111320;
+    const dLon = (a.lon - b.lon) * 111320 * Math.cos((a.lat * Math.PI) / 180);
+    const d = Math.hypot(dLat, dLon);
+    if (d < 150 || (a.name === b.name && d < 250)) parent.set(find(from), find(to));
+  }
+
+  const complexById = new Map();
+  for (const id of stationsById.keys()) complexById.set(id, find(id));
+  return complexById;
+}
+
 // Returns geometry for multiple routes at once: stations deduped across routes (a
 // physical station may be served by several lines), plus each route's own track/color.
 async function getMultiRouteGeometry(routeIds) {
@@ -635,8 +676,10 @@ async function getMultiRouteGeometry(routeIds) {
     }
   }
 
+  const complexById = assignComplexIds(stationsById);
+
   return {
-    stations: [...stationsById.values()],
+    stations: [...stationsById.values()].map((s) => ({ ...s, complexId: complexById.get(s.stopId) })),
     // stationIds lets clients filter the global station list down to just the ~20-90
     // stations a given route actually serves before doing any per-station geometry
     // matching — without it, matching logic ends up checking every station against every
