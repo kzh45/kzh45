@@ -9,6 +9,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { distanceMeters, bearingBetween, offsetRightOfTravel, pointAndBearingAtDistance } = require('../public/map-core');
+const { _internal } = require('../gtfs-static');
+
+const { computeParallelStrands } = _internal;
 
 // NYC scale: ~111320 m per degree lat, ~84000 m per degree lon at 40.75N.
 test('distanceMeters: 1 degree of latitude ~111km', () => {
@@ -60,6 +63,68 @@ test('offset magnitude matches requested meters', () => {
 test('zero offset or null bearing returns the point unchanged', () => {
   assert.deepEqual(offsetRightOfTravel([40.75, -73.98], [0, 1], 0), [40.75, -73.98]);
   assert.deepEqual(offsetRightOfTravel([40.75, -73.98], null, 20), [40.75, -73.98]);
+});
+
+// computeParallelStrands offsets shared-track routes onto side-by-side strands for
+// drawing, without touching solo track or bundling routes that merely cross. Getting the
+// bundling wrong would either wash lines out (no offset) or shove solo lines off the map.
+const EARTH = 111320;
+const sharedEW = () => [
+  [40.75, -74.0],
+  [40.75, -73.99],
+  [40.75, -73.98],
+];
+
+test('two routes on the same track offset to opposite, centered sides ~22m apart', () => {
+  const out = computeParallelStrands([
+    { routeId: 'N', track: { N: [sharedEW()], S: [] } },
+    { routeId: 'Q', track: { N: [sharedEW()], S: [] } },
+  ]);
+  const nLat = out.get('N').N[0][1][0];
+  const qLat = out.get('Q').N[0][1][0];
+  assert.ok(Math.sign(nLat - 40.75) !== Math.sign(qLat - 40.75), 'opposite sides of the track');
+  assert.ok(Math.abs((nLat - 40.75) * EARTH - 11) < 0.5, `N ~11m off, got ${(nLat - 40.75) * EARTH}`);
+  assert.ok(Math.abs(Math.abs(nLat - qLat) * EARTH - 22) < 0.5, 'strands ~22m apart');
+});
+
+test('a route alone on its track gets no display copy at all', () => {
+  const out = computeParallelStrands([
+    { routeId: 'N', track: { N: [sharedEW()], S: [] } },
+    { routeId: '1', track: { N: [[[40.7, -74.0], [40.7, -73.99]]], S: [] } },
+  ]);
+  // Absent = client draws the true centerline; a verbatim copy would just bloat the payload.
+  assert.equal(out.get('1'), undefined, 'solo route omitted from strand output');
+});
+
+test('a perpendicular crossing route does not bundle', () => {
+  // An N-S line crossing the E-W track shares a grid cell but not a heading — neither
+  // route shares track, so neither needs a display copy.
+  const out = computeParallelStrands([
+    { routeId: 'N', track: { N: [sharedEW()], S: [] } },
+    { routeId: 'L', track: { N: [[[40.74, -73.99], [40.76, -73.99]]], S: [] } },
+  ]);
+  assert.equal(out.get('N'), undefined, 'N unchanged with only a crossing route nearby');
+  assert.equal(out.get('L'), undefined);
+});
+
+test('both direction shapes of a route land on the SAME side (no mirroring)', () => {
+  // Regression: headings must encode line orientation, not travel direction. If the
+  // southbound shape (reversed point order) offsets to the opposite side, trunk-mates
+  // stack their strands and the later-drawn color overpaints both.
+  const reversed = () => [...sharedEW()].reverse();
+  const out = computeParallelStrands([
+    { routeId: 'N', track: { N: [sharedEW()], S: [reversed()] } },
+    { routeId: 'Q', track: { N: [sharedEW()], S: [reversed()] } },
+  ]);
+  const sideOf = (poly) => Math.sign(poly[1][0] - 40.75); // midpoint lat vs centerline
+  const nN = sideOf(out.get('N').N[0]);
+  const nS = sideOf(out.get('N').S[0]);
+  const qN = sideOf(out.get('Q').N[0]);
+  const qS = sideOf(out.get('Q').S[0]);
+  assert.ok(nN !== 0 && qN !== 0, 'both routes offset');
+  assert.equal(nN, nS, "N route's two direction shapes on the same side");
+  assert.equal(qN, qS, "Q route's two direction shapes on the same side");
+  assert.notEqual(nN, qN, 'N and Q on opposite sides');
 });
 
 test('pointAndBearingAtDistance: midpoint of a straight E-W subpath', () => {

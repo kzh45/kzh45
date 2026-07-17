@@ -216,8 +216,11 @@ async function loadGeometry() {
     // 3 lines instead of forcing everything onto whichever single shape happened to be
     // picked, which previously stranded stations on other branches far off the drawn line.
     // References are kept per route so alert selection can highlight the affected track.
+    // Draw the parallel-offset strands (routes sharing track fanned side-by-side) if the
+    // server computed them; trackIndex below still uses the true centerline (route.track).
+    const drawTrack = route.trackDisplay || route.track;
     const lines = [];
-    const shapes = [...(route.track.N || []), ...(route.track.S || [])];
+    const shapes = [...(drawTrack.N || []), ...(drawTrack.S || [])];
     for (const shape of shapes) {
       lines.push(L.polyline(shape, { color: route.color || DEFAULT_ROUTE_COLOR, weight: 3, opacity: 0.6 }).addTo(map));
     }

@@ -3,6 +3,8 @@ const path = require('path');
 const readline = require('readline');
 const AdmZip = require('adm-zip');
 const fetch = require('node-fetch');
+// Shared client/server geometry helpers (map-core exports them for node when require()d).
+const { distanceMeters, bearingBetween, offsetRightOfTravel } = require('./public/map-core');
 
 const STATIC_GTFS_URL = 'http://web.mta.info/developers/data/nyct/subway/google_transit.zip';
 const DATA_DIR = path.join(__dirname, 'data', 'gtfs-static');
@@ -220,16 +222,8 @@ function parseShapeIdsForRoute(routeId) {
   return shapeIdsByDirection;
 }
 
-function metersPerDegree(lat) {
-  return { lat: 111320, lon: 111320 * Math.cos((lat * Math.PI) / 180) };
-}
-
-function distanceMeters([lat1, lon1], [lat2, lon2]) {
-  const { lat: mLat, lon: mLon } = metersPerDegree((lat1 + lat2) / 2);
-  const dy = (lat2 - lat1) * mLat;
-  const dx = (lon2 - lon1) * mLon;
-  return Math.sqrt(dx * dx + dy * dy);
-}
+// distanceMeters comes from map-core (top of file) — this file had its own identical
+// copy for years; one implementation now serves shape dedup, complex merging, and strands.
 
 // Evenly-spaced sample points along a shape's length, used as a cheap "fingerprint" to
 // tell genuinely different branches apart from near-duplicate shape variants (e.g. the
@@ -653,15 +647,169 @@ function assignComplexIds(stationsById) {
     const a = stationsById.get(from);
     const b = stationsById.get(to);
     if (!a || !b) continue;
-    const dLat = (a.lat - b.lat) * 111320;
-    const dLon = (a.lon - b.lon) * 111320 * Math.cos((a.lat * Math.PI) / 180);
-    const d = Math.hypot(dLat, dLon);
+    const d = distanceMeters([a.lat, a.lon], [b.lat, b.lon]);
     if (d < 150 || (a.name === b.name && d < 250)) parent.set(find(from), find(to));
   }
 
   const complexById = new Map();
   for (const id of stationsById.keys()) complexById.set(id, find(id));
   return complexById;
+}
+
+// Draw order for parallel strands. Where several routes share physical track, each is
+// nudged perpendicular by a slot so they render side-by-side instead of one color hiding
+// the rest — the way MTA's own map draws the Broadway or Lexington trunks. This order
+// decides which line takes which side; grouping trunk-mates adjacently keeps each bundle
+// tight and stops strands from crossing. Any route not listed sorts to the end.
+const STRAND_RANK = new Map(
+  [
+    '1', '2', '3', '4', '5', '6', '6X', '7', '7X',
+    'A', 'C', 'E', 'B', 'D', 'F', 'FX', 'M',
+    'N', 'Q', 'R', 'W', 'G', 'J', 'Z', 'L',
+    'GS', 'FS', 'H', 'SI',
+  ].map((id, i) => [id, i])
+);
+const STRAND_SPACING_M = 22; // perpendicular gap between adjacent strands
+const STRAND_CELL_DEG = 0.00025; // ~28m spatial-hash cell for finding shared track
+const STRAND_PARALLEL_DOT = 0.9; // |cos| of heading angle: only near-parallel lines bundle
+// Routes bundle only if their shapes actually coincide within this. MTA reuses identical
+// shape points on genuinely-shared track (measured median gap 0m), while separate
+// structures that merely pass close underground — IRT vs BMT at the Atlantic/Barclays and
+// DeKalb junctions — stay ~27m apart. 8m keeps the former together and the latter apart.
+const STRAND_MERGE_DIST_M = 8;
+const STRAND_SMOOTH_M = 250; // along-track median window that absorbs transient junction spikes
+// Inline meters-per-degree for the bundle-detection hot loop ONLY (runs ~92k points ×
+// neighbor entries; map-core's distanceMeters would allocate + recompute cos per call).
+// Everything non-hot uses the shared map-core helpers.
+const EARTH_M_PER_DEG = 111320;
+
+function strandRank(routeId) {
+  const r = STRAND_RANK.get(routeId);
+  return r === undefined ? STRAND_RANK.size : r;
+}
+
+// routeId -> { N: [offsetPolyline,...], S: [...] } for DRAWING only. Station snapping and
+// train interpolation keep using the true centerline (route.track) — trains run down the
+// middle of their bundle, the colored strands fan out around them. Bundles are found by
+// spatial hashing every route's shape points and grouping near-parallel neighbours; a
+// point on solo track gets no offset, so single-route segments stay exactly where they are.
+function computeParallelStrands(routes) {
+  const cosLat = (lat) => Math.cos((lat * Math.PI) / 180);
+  const cellKey = (lat, lon) => `${Math.round(lat / STRAND_CELL_DEG)},${Math.round(lon / STRAND_CELL_DEG)}`;
+  const grid = new Map(); // cellKey -> [{ routeId, uE, uN }]
+  const metas = []; // { routeId, direction, polyIdx, points, headings }
+
+  for (const route of routes) {
+    for (const direction of ['N', 'S']) {
+      const polylines = route.track?.[direction] || [];
+      polylines.forEach((raw, polyIdx) => {
+        const points = raw.filter((p, i) => i === 0 || p[0] !== raw[i - 1][0] || p[1] !== raw[i - 1][1]);
+        if (points.length < 2) return;
+        // Line ORIENTATION, not travel direction: canonicalize each unit heading into the
+        // north (tie: east) half-plane. Without this, a route's northbound and southbound
+        // shapes offset to OPPOSITE sides — trunk-mates' strands then stack and the
+        // later-drawn route's color overpaints both (invisible on same-color trunks like
+        // N/Q/R/W, but E's blue vanished under F's orange on Queens Blvd).
+        const headings = points.map((_, i) => {
+          const src = i < points.length - 1 ? points[i] : points[i - 1];
+          const dst = i < points.length - 1 ? points[i + 1] : points[i];
+          const b = bearingBetween(src, dst) || [1, 0]; // (east, north); null only for degenerate pairs
+          return b[1] < 0 || (b[1] === 0 && b[0] < 0) ? [-b[0], -b[1]] : b;
+        });
+        points.forEach((p, i) => {
+          const k = cellKey(p[0], p[1]);
+          let arr = grid.get(k);
+          if (!arr) grid.set(k, (arr = []));
+          arr.push({ routeId: route.routeId, lat: p[0], lon: p[1], uE: headings[i][0], uN: headings[i][1] });
+        });
+        metas.push({ routeId: route.routeId, direction, polyIdx, points, headings });
+      });
+    }
+  }
+
+  const out = new Map();
+  const ensure = (routeId) => {
+    let o = out.get(routeId);
+    if (!o) out.set(routeId, (o = { N: [], S: [] }));
+    return o;
+  };
+
+  const routesWithOffsets = new Set();
+
+  for (const meta of metas) {
+    const { points, headings } = meta;
+
+    // Raw signed offset per point = its slot within the local shared-track bundle.
+    const raw = points.map((p, i) => {
+      const [uE, uN] = headings[i];
+      const ci = Math.round(p[0] / STRAND_CELL_DEG);
+      const cj = Math.round(p[1] / STRAND_CELL_DEG);
+      const bundle = new Set([meta.routeId]);
+      const cLat = cosLat(p[0]);
+      for (let di = -1; di <= 1; di++) {
+        for (let dj = -1; dj <= 1; dj++) {
+          const arr = grid.get(`${ci + di},${cj + dj}`);
+          if (!arr) continue;
+          for (const e of arr) {
+            if (e.routeId === meta.routeId || bundle.has(e.routeId)) continue;
+            if (Math.abs(e.uE * uE + e.uN * uN) < STRAND_PARALLEL_DOT) continue; // not parallel — a crossing line
+            const dN = (e.lat - p[0]) * EARTH_M_PER_DEG;
+            const dE = (e.lon - p[1]) * EARTH_M_PER_DEG * cLat;
+            if (Math.hypot(dN, dE) <= STRAND_MERGE_DIST_M) bundle.add(e.routeId); // tracks actually coincide
+          }
+        }
+      }
+      if (bundle.size < 2) return 0;
+      const ranked = [...bundle].sort((a, b) => strandRank(a) - strandRank(b));
+      return (ranked.indexOf(meta.routeId) - (ranked.length - 1) / 2) * STRAND_SPACING_M;
+    });
+
+    // Median-smooth the offset along the line. Junctions (DeKalb, Canal…) briefly stack
+    // many routes within merge distance, spiking one point's slot; a route's real trunk
+    // membership is sustained over long runs, so the windowed median rejects those narrow
+    // spikes and eases the transitions where a route joins or leaves a bundle.
+    const cum = [0];
+    for (let i = 1; i < points.length; i++) cum[i] = cum[i - 1] + distanceMeters(points[i - 1], points[i]);
+    const smooth = raw.map((_, i) => {
+      let lo = i;
+      let hi = i;
+      while (lo > 0 && cum[i] - cum[lo - 1] <= STRAND_SMOOTH_M) lo--;
+      while (hi < points.length - 1 && cum[hi + 1] - cum[i] <= STRAND_SMOOTH_M) hi++;
+      const win = raw.slice(lo, hi + 1).sort((a, b) => a - b);
+      return win[Math.floor(win.length / 2)];
+    });
+
+    let anyOffset = false;
+    const offsetPoly = points.map((p, i) => {
+      const s = smooth[i];
+      if (!s) return p;
+      anyOffset = true;
+      const [lat, lon] = offsetRightOfTravel(p, headings[i], s);
+      // 6 decimals ≈ 0.1m — noise against a 22m offset. Full doubles would serialize at
+      // 15+ digits and roughly triple this endpoint's JSON size.
+      return [Math.round(lat * 1e6) / 1e6, Math.round(lon * 1e6) / 1e6];
+    });
+    ensure(meta.routeId)[meta.direction][meta.polyIdx] = offsetPoly;
+    if (anyOffset) routesWithOffsets.add(meta.routeId);
+  }
+
+  // Backfill polylines that were too short to offset, so display indices line up with track
+  // and no sparse holes reach JSON.
+  for (const route of routes) {
+    const o = ensure(route.routeId);
+    for (const direction of ['N', 'S']) {
+      const src = route.track?.[direction] || [];
+      for (let i = 0; i < src.length; i++) if (!o[direction][i]) o[direction][i] = src[i];
+    }
+  }
+
+  // Only routes that actually got an offset somewhere need a display copy — for the rest
+  // the client falls back to the true track (trackDisplay || track), keeping verbatim
+  // duplicates of isolated lines (the L, Franklin shuttle) out of the payload entirely.
+  for (const routeId of [...out.keys()]) {
+    if (!routesWithOffsets.has(routeId)) out.delete(routeId);
+  }
+  return out;
 }
 
 // Returns geometry for multiple routes at once: stations deduped across routes (a
@@ -677,6 +825,7 @@ async function getMultiRouteGeometry(routeIds) {
   }
 
   const complexById = assignComplexIds(stationsById);
+  const strands = computeParallelStrands(results);
 
   return {
     stations: [...stationsById.values()].map((s) => ({ ...s, complexId: complexById.get(s.stopId) })),
@@ -688,7 +837,10 @@ async function getMultiRouteGeometry(routeIds) {
     routes: results.map((r) => ({
       routeId: r.routeId,
       color: r.color,
-      track: r.track,
+      track: r.track, // true centerline — station snapping + train interpolation
+      // Parallel-offset strands, drawing only; absent when this route shares no track
+      // (clients fall back to the centerline via trackDisplay || track).
+      trackDisplay: strands.get(r.routeId),
       stationIds: r.stations.map((s) => s.stopId),
     })),
   };
@@ -712,6 +864,7 @@ module.exports = {
     matchStaticTrip,
     anchorScheduledMs,
     orderStationsByPrecedence,
+    computeParallelStrands,
     FALLBACK_CODE_TOLERANCE,
   },
 };

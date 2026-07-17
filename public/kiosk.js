@@ -92,8 +92,10 @@ async function loadGeometry() {
   for (const route of routes) {
     trackIndex.addRoute(route, stations);
 
+    // Parallel-offset strands for drawing (see map.js); trackIndex uses true centerline.
+    const drawTrack = route.trackDisplay || route.track;
     const lines = [];
-    const shapes = [...(route.track.N || []), ...(route.track.S || [])];
+    const shapes = [...(drawTrack.N || []), ...(drawTrack.S || [])];
     for (const shape of shapes) {
       lines.push(L.polyline(shape, { color: route.color || DEFAULT_ROUTE_COLOR, weight: 4, opacity: 0.75 }).addTo(map));
     }
