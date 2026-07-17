@@ -43,15 +43,43 @@ function trainOffsetMeters() {
   return (TRAIN_OFFSET_PX * 156543.03392 * Math.cos(NYC_LAT_RAD)) / 2 ** zoom;
 }
 
-function tickVehiclePositions() {
+// ~30fps rAF animation, same as the interactive map (see map.js for the full rationale).
+// No viewport gate here — the kiosk's fixed city-wide view contains every train — so
+// there's no coarse catch-up pass either. Just the sub-pixel write gate: at this zoom
+// nearly all per-frame motion is under a third of a pixel, so frames cost math only.
+const FRAME_INTERVAL_MS = 33;
+const FRAME_MIN_PX = 0.3;
+const COS_NYC = Math.cos(NYC_LAT_RAD);
+
+function updateVehiclePositions(force = false) {
   const now = Date.now();
   const offset = trainOffsetMeters();
+  const zoom = map.getZoom();
+  if (zoom === undefined) return; // before fitBounds resolves
+  const metersPerPx = (156543.03392 * COS_NYC) / 2 ** zoom;
+  const minMoveM2 = (FRAME_MIN_PX * metersPerPx) ** 2;
+
   for (const [tripId, { routeId, segment }] of vehicleSegments) {
     const marker = vehicleMarkers.get(tripId);
-    if (marker) marker.setLatLng(trackIndex.positionAlongSegment(routeId, segment, now, offset));
+    if (!marker) continue;
+    const cur = marker.getLatLng();
+    const pos = trackIndex.positionAlongSegment(routeId, segment, now, offset);
+    const dLat = (pos[0] - cur.lat) * 111320;
+    const dLon = (pos[1] - cur.lng) * 111320 * COS_NYC;
+    if (!force && dLat * dLat + dLon * dLon < minMoveM2) continue;
+    marker.setLatLng(pos);
   }
 }
-setInterval(tickVehiclePositions, 1000);
+
+let lastFrameMs = 0;
+function animationLoop(ts) {
+  if (ts - lastFrameMs >= FRAME_INTERVAL_MS) {
+    lastFrameMs = ts;
+    updateVehiclePositions();
+  }
+  requestAnimationFrame(animationLoop);
+}
+requestAnimationFrame(animationLoop);
 
 async function loadGeometry() {
   const res = await fetch('/api/lines/geometry');

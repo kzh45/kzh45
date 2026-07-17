@@ -83,23 +83,14 @@ html, body.map-body {
   background: var(--bg);
 }
 
-/* Position is recomputed every 1s in map.js (continuous crawl between stations);
-   this transition smooths out the small per-tick jump into a fluid glide.
-   During zoom, Leaflet repositions markers itself — our transition must be off then,
-   or markers visibly lag/float away from the map instead of scaling with it. Two rules
-   cover this: .leaflet-zoom-anim (Leaflet's own class for CSS3 animated zoom) and
-   .zooming (set via zoomstart/zoomend in map.js) — the former doesn't reliably cover
-   touch pinch-zoom on mobile, so both are needed. */
+/* No position transition here: map.js animates positions on a ~30fps rAF loop, so
+   motion is genuinely continuous. (The old 1s tick + 1.05s transition combo produced a
+   visible once-a-second cadence and required hacks to stop markers lagging the map
+   during zoom — all gone with frame-driven updates.) */
 .leaflet-marker-icon.train-icon {
-  transition: transform 1.05s linear;
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.leaflet-zoom-anim .leaflet-marker-icon.train-icon,
-#map.zooming .leaflet-marker-icon.train-icon {
-  transition: none !important;
 }
 
 /* A dark gap between the route-colored fill and the status ring keeps the ring visible

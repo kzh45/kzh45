@@ -21,13 +21,6 @@ function updateMarkerScale() {
 map.on('zoom', updateMarkerScale);
 updateMarkerScale();
 
-// The per-tick glide transition (see map.css) must be off during ANY zoom, or markers
-// visibly lag/float away from the map instead of scaling with it. Relying on Leaflet's
-// own .leaflet-zoom-anim class covers button/programmatic zoom but not touch pinch-zoom
-// reliably (seen on mobile) — zoomstart/zoomend fire for every zoom interaction method.
-map.on('zoomstart', () => mapEl.classList.add('zooming'));
-map.on('zoomend', () => mapEl.classList.remove('zooming'));
-
 const vehicleMarkers = new Map(); // tripId -> L.marker
 const vehicleSegments = new Map(); // tripId -> { routeId, segment, status, delaySeconds, currentStatus, destination }
 const stationNamesById = new Map(); // base stopId -> station name
@@ -123,35 +116,79 @@ function trainOffsetMeters() {
   return (TRAIN_OFFSET_PX * 156543.03392 * Math.cos(NYC_LAT_RAD)) / 2 ** map.getZoom();
 }
 
-// Ticks every second so trains crawl continuously between stations instead of only
-// jumping when a new poll arrives every REFRESH_MS.
-function tickVehiclePositions() {
+// Trains animate on a ~30fps requestAnimationFrame loop, recomputing each position from
+// its time-projected segment every frame — genuinely continuous motion instead of the
+// old 1s tick smoothed by a CSS transition (which produced a visible once-a-second
+// cadence and made markers lag the map during zoom). DOM writes are the expensive part
+// with ~700 markers, so each frame gates them hard:
+//   - skip markers outside the (padded) viewport, catching them up on a ~1s coarse pass
+//   - skip movements under a third of a pixel at the current zoom
+// Zoomed out, nearly all motion is sub-pixel and frames cost almost nothing; zoomed in,
+// only the handful of visible trains actually move — right where smoothness is seen.
+const FRAME_INTERVAL_MS = 33; // ~30fps
+const FRAME_MIN_PX = 0.3;
+const COS_NYC = Math.cos(NYC_LAT_RAD);
+let lastCoarsePassMs = 0;
+
+function updateVehiclePositions(force = false) {
   const now = Date.now();
   const offset = trainOffsetMeters();
+  const metersPerPx = (156543.03392 * COS_NYC) / 2 ** map.getZoom();
+  const minMoveM2 = (FRAME_MIN_PX * metersPerPx) ** 2;
+  const bounds = map.getBounds().pad(0.2);
+  // A zero-size container (map not laid out yet, or an embedding that collapses it)
+  // degenerates getBounds() to a point that contains nothing — the viewport gate would
+  // silently freeze every marker between coarse passes. Skip the gate in that state.
+  const mapSize = map.getSize();
+  const boundsUsable = mapSize.x > 0 && mapSize.y > 0;
+  const coarsePass = force || now - lastCoarsePassMs > 1000;
+  if (coarsePass) lastCoarsePassMs = now;
+
   for (const [tripId, { routeId, segment }] of vehicleSegments) {
     const marker = vehicleMarkers.get(tripId);
     if (!marker) continue;
+    const cur = marker.getLatLng();
+    if (!coarsePass && boundsUsable && !bounds.contains(cur)) continue;
+
     const pos = trackIndex.positionAlongSegment(routeId, segment, now, offset);
+    const dLat = (pos[0] - cur.lat) * 111320;
+    const dLon = (pos[1] - cur.lng) * 111320 * COS_NYC;
+    if (!force && dLat * dLat + dLon * dLon < minMoveM2) continue;
+
     marker.setLatLng(pos);
     // Leaflet doesn't move an already-open popup along with its marker — keep the (at
-    // most one) open train popup glued to the train, with its ETA counting down live.
-    if (marker.isPopupOpen()) {
-      marker.getPopup().setLatLng(pos);
-      marker.setPopupContent(renderTrainPopup(tripId));
-    }
+    // most one) open train popup glued to the train.
+    if (marker.isPopupOpen()) marker.getPopup().setLatLng(pos);
   }
 }
-setInterval(tickVehiclePositions, 1000);
-// The pixel-constant offset means positions shift slightly with zoom — resync right
-// after a zoom settles instead of waiting up to a second for the next tick.
-map.on('zoomend', tickVehiclePositions);
 
-// The 1s interval itself can get throttled while backgrounded (mobile WebViews especially)
-// and browsers don't reliably fire it the instant a page becomes visible again — force an
-// immediate resync so markers don't sit visibly stale for up to another second after that.
+let lastFrameMs = 0;
+function animationLoop(ts) {
+  if (ts - lastFrameMs >= FRAME_INTERVAL_MS) {
+    lastFrameMs = ts;
+    updateVehiclePositions();
+  }
+  requestAnimationFrame(animationLoop);
+}
+requestAnimationFrame(animationLoop);
+
+// The pixel-constant right-hand offset shifts with zoom — force a full resync when a
+// zoom settles so every marker (including sub-pixel and off-screen ones) lands exactly.
+map.on('zoomend', () => updateVehiclePositions(true));
+map.on('moveend', () => updateVehiclePositions(true));
+
+// rAF pauses in background tabs/WebViews; force a resync the moment the page is visible
+// again so markers don't show stale positions for even a frame longer than needed.
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) tickVehiclePositions();
+  if (!document.hidden) updateVehiclePositions(true);
 });
+
+// The open popup's ETA countdown only needs coarse updates — once a second, not 30fps.
+setInterval(() => {
+  for (const [tripId, marker] of vehicleMarkers) {
+    if (marker.isPopupOpen()) marker.setPopupContent(renderTrainPopup(tripId));
+  }
+}, 1000);
 
 async function loadGeometry() {
   const res = await fetch('/api/lines/geometry');

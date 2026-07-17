@@ -33,17 +33,12 @@ html, body {
   color: #5a6472 !important;
 }
 
-/* Position is recomputed every 1s (continuous crawl between stations); this transition
-   smooths the per-tick jump into a fluid glide. Disabled during the one-time fitBounds()
-   zoom-in on load so markers don't visibly lag behind the map settling into place. */
+/* No position transition: kiosk.js animates positions on a ~30fps rAF loop (see map.css
+   for the same note on the interactive map). */
 .leaflet-marker-icon.train-icon {
-  transition: transform 1.05s linear;
   display: flex;
   align-items: center;
   justify-content: center;
-}
-.leaflet-zoom-anim .leaflet-marker-icon.train-icon {
-  transition: none !important;
 }
 
 #alerts {
